@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# Node.js / React
+pwa/node_modules/
+pwa/build/
+pwa/dist/
+pwa/.env
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Misc
+*.swp
+*.swo
+
+api-old/
+coinslot_test/
