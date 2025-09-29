@@ -1,4 +1,4 @@
-#include "relay_hopper.h"
+#include "RelayHopper.h"
 
 RelayController::RelayController(uint8_t pin1, uint8_t pin2, uint8_t pin3) {
     relayPins[0] = pin1;
@@ -9,7 +9,7 @@ RelayController::RelayController(uint8_t pin1, uint8_t pin2, uint8_t pin3) {
 void RelayController::begin() {
     for (int i = 0; i < 3; i++) {
         pinMode(relayPins[i], OUTPUT);
-        digitalWrite(relayPins[i], LOW);
+        digitalWrite(relayPins[i], HIGH);
     }
 }
 

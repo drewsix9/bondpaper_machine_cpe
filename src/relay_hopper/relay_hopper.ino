@@ -1,4 +1,4 @@
-#include "relay_hopper.h"
+#include "RelayHopper.h"
 
 #define RELAY1_PIN 4
 #define RELAY2_PIN 5
