@@ -61,7 +61,7 @@ int CoinSlotISR::getCoinValue(int count) {
 void CoinSlotISR::processCoin(int count) {
   int value = getCoinValue(count);
   totalValue += value;
-  // Serial.println(value);
+  Serial.println(value);
 }
 
 void CoinSlotISR::processCommand(String cmd) {
