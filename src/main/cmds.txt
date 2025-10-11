@@ -1,0 +1,13 @@
+{"v": 1,"target": "CoinSlot","cmd": "status"}
+
+{"v": 1,"target": "CoinSlot","cmd": "attach"}
+
+{"v": 1,"target": "CoinSlot","cmd": "detach"}
+
+{"v": 1,"target": "PaperDispenser","cmd": "dispense","name": "a4Dispenser","value": 2}
+
+{"v": 1,"target": "PaperDispenser","cmd": "dispense","name": "longDispenser","value": 2}
+
+{"v": 1,"target": "CoinCounter","cmd": "dispense","name": "Peso1","value": 19}
+{"v": 1,"target": "CoinCounter","cmd": "dispense","name": "Peso5","value": 3}
+{"v": 1,"target": "CoinCounter","cmd": "dispense","name": "Peso10","value": 2}

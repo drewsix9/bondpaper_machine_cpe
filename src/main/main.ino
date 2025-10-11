@@ -1,262 +1,450 @@
-#include "config.h"         // pins & motor configs (A4/LONG, relays, sensors)  // :contentReference[oaicite:5]{index=5}
-#include "CoinSlotISR.h"    // pulse-based coin insert ISR                      // :contentReference[oaicite:6]{index=6}
-#include "CoinCounter.h"    // per-hopper coin-out counters with timeout        // :contentReference[oaicite:7]{index=7}
-#include "RelayHopper.h"    // 3-ch relay controller (active-low)               // :contentReference[oaicite:8]{index=8}
-#include "StepperMotor.h"   // PaperDispenser (stepper + dc + limit switch)     // :contentReference[oaicite:9]{index=9}
+/**
+ * Main controller for Bond Paper Machine
+ * 
+ * This sketch integrates several modules:
+ * - CoinSlotISR: Detects inserted coins with interrupt
+ * - CoinCounter: Tracks and dispenses coins of different denominations
+ * - PaperDispenser: Controls paper dispensing using stepper and DC motors
+ * - RelayHopper: Controls relay outputs for coin dispensers
+ * 
+ * The system accepts JSON commands over serial from a Raspberry Pi
+ * and returns JSON responses for status, events, and acknowledgements.
+ */
 
-/* ---------------- Instances ---------------- */
+#include <Arduino.h>
+#include <ArduinoJson.h>
 
-CoinSlotISR coinSlot(COINS_PULSE_PIN);
+#include "CoinSlotISR.h"
+#include "CoinCounter.h"
+#include "StepperMotor.h"
+#include "config.h"
+// RelayHopper.h is now included through CoinCounter.h
 
-// Map: Relay1 -> 1 peso, Relay2 -> 5 peso, Relay3 -> 10 peso (adjust if different)
-RelayController relays(RELAY1_PIN, RELAY2_PIN, RELAY3_PIN);
+// ========== SYSTEM CONFIGURATION ==========
+// All pin definitions are now directly used from config.h
+// - Coin slot uses COINS_PULSE_PIN
+// - A4 paper dispenser uses a4_step_motors structure
+// - Long paper dispenser uses long_step_motors structure 
+// - Coin counters use ONE_SENSOR_PIN, FIVE_SENSOR_PIN, and TEN_SENSOR_PIN
+// - Relay control uses RELAY1_PIN, RELAY2_PIN, and RELAY3_PIN
+// - Buzzer functionality uses BUZZER_PIN
 
-// Coin-out sensors for each hopper (falling edge -> ezButton inside CoinCounter)
-CoinCounter oneCounter(ONE_SENSOR_PIN,  String("ONE"));
-CoinCounter fiveCounter(FIVE_SENSOR_PIN, String("FIVE"));
-CoinCounter tenCounter(TEN_SENSOR_PIN,   String("TEN"));
+  // ========== MODULE INSTANCES ==========
 
-// Paper dispensers (A4 & LONG) wired from config.h (dir, pulse, limit, steps; IN1, IN2, EN)
-PaperDispenser dispA4(
-  a4_step_motors.stepper.pulse_pin,
-  a4_step_motors.stepper.dir_pin,
-  a4_step_motors.dc_motor.IN1,
-  a4_step_motors.dc_motor.IN2,
-  a4_step_motors.dc_motor.en_pin,
-  a4_step_motors.stepper.limit_switch,
-  a4_step_motors.stepper.steps
+// Coin Slot (detects inserted coins)
+CoinSlotISR coinSlot(COINS_PULSE_PIN);// Paper Dispensers
+PaperDispenser paperDispenser1(
+  a4_step_motors.stepper.pulse_pin, a4_step_motors.stepper.dir_pin,
+  a4_step_motors.dc_motor.IN1, a4_step_motors.dc_motor.IN2, a4_step_motors.dc_motor.en_pin,
+  a4_step_motors.stepper.limit_switch, a4_step_motors.stepper.steps, "a4Dispenser"
 );
-PaperDispenser dispLONG(
-  long_step_motors.stepper.pulse_pin,
-  long_step_motors.stepper.dir_pin,
-  long_step_motors.dc_motor.IN1,
-  long_step_motors.dc_motor.IN2,
-  long_step_motors.dc_motor.en_pin,
-  long_step_motors.stepper.limit_switch,
-  long_step_motors.stepper.steps
+
+PaperDispenser paperDispenser2(
+  long_step_motors.stepper.pulse_pin, long_step_motors.stepper.dir_pin,
+  long_step_motors.dc_motor.IN1, long_step_motors.dc_motor.IN2, long_step_motors.dc_motor.en_pin,
+  long_step_motors.stepper.limit_switch, long_step_motors.stepper.steps, "longDispenser"
 );
 
-/* ---------------- Helpers ---------------- */
+// Relay Control (coin hopper control) - created first so we can pass to coin counters
+RelayHopper relayController(RELAY1_PIN, RELAY2_PIN, RELAY3_PIN, "RelayController");
 
-static inline void relayOnForValue(int value) {
-  // NOTE: RelayController::setRelay(relayNum, false) prints "ON" (active-low).  // :contentReference[oaicite:10]{index=10}
-  if (value == 1)      relays.setRelay(1, false);
-  else if (value == 5) relays.setRelay(2, false);
-  else if (value == 10)relays.setRelay(3, false);
-}
+// Coin Counters (for dispensing coins) - each connected to a specific relay
+CoinCounter oneCounter(ONE_SENSOR_PIN, "Peso1", &relayController, 1);
+CoinCounter fiveCounter(FIVE_SENSOR_PIN, "Peso5", &relayController, 2);
+CoinCounter tenCounter(TEN_SENSOR_PIN, "Peso10", &relayController, 3);
 
-static inline void relayOffForValue(int value) {
-  if (value == 1)      relays.setRelay(1, true);
-  else if (value == 5) relays.setRelay(2, true);
-  else if (value == 10)relays.setRelay(3, true);
-}
+// ========== SERIAL COMMUNICATION ==========
+const long SERIAL_BAUD = 115200;  // High baud rate for fast communication
+const int BUFFER_SIZE = 256;      // Serial buffer size
+char serialBuffer[BUFFER_SIZE];   // Buffer for incoming serial data
+int bufferIndex = 0;              // Current position in buffer
 
-static CoinCounter* counterForValue(int value) {
-  if (value == 1)  return &oneCounter;
-  if (value == 5)  return &fiveCounter;
-  if (value == 10) return &tenCounter;
-  return nullptr;
-}
+// JSON document for system status and info
+StaticJsonDocument<512> systemInfoDoc;
 
-// Synchronous coin-dispense loop: runs until target reached or timeout
-bool dispenseCoinValue(int value, int count, unsigned long hardStopMs = 20000UL) {
-  CoinCounter* c = counterForValue(value);
-  if (!c || count <= 0) {
-    Serial.println(F("{\"ok\":false,\"error\":\"bad_value_or_count\"}"));
-    return false;
+// ========== TIMING VARIABLES ==========
+unsigned long lastStatusTime = 0;
+const unsigned long STATUS_INTERVAL = 5000;  // Status update every 5 seconds
+
+// ========== SYSTEM FUNCTIONS ==========
+
+/**
+ * Send a system-level acknowledgement for commands that 
+ * aren't handled by specific modules
+ */
+void sendSystemAck(const char* cmd, bool ok, const char* status = nullptr) {
+  systemInfoDoc.clear();
+  
+  systemInfoDoc["v"] = 1;
+  systemInfoDoc["source"] = "System";
+  systemInfoDoc["type"] = "ack";
+  systemInfoDoc["ts"] = millis();
+  
+  JsonObject data = systemInfoDoc.createNestedObject("data");
+  data["cmd"] = cmd;
+  data["ok"] = ok;
+  
+  if (status) {
+    data["status"] = status;
   }
+  
+  serializeJson(systemInfoDoc, Serial);
+  Serial.println();
+}
 
-  // Prepare counter state & power the hopper relay
-  c->dispense(count);          // sets target & starts timeout window           // :contentReference[oaicite:11]{index=11}
-  relayOnForValue(value);
+/**
+ * Send a system status message with all component states
+ */
+void sendSystemStatusJson() {
+  systemInfoDoc.clear();
+  
+  systemInfoDoc["v"] = 1;
+  systemInfoDoc["source"] = "System";
+  systemInfoDoc["type"] = "status";
+  systemInfoDoc["ts"] = millis();
+  
+  JsonObject data = systemInfoDoc.createNestedObject("data");
+  
+  // Coin slot status
+  JsonObject coinSlotObj = data.createNestedObject("coinSlot");
+  coinSlotObj["attached"] = coinSlot.isAttached();
+  
+  // Paper dispenser status
+  JsonObject paperObj = data.createNestedObject("paperDispensers");
+  paperObj["paper1"] = paperDispenser1.isDispensing() ? "dispensing" : "idle";
+  paperObj["paper2"] = paperDispenser2.isDispensing() ? "dispensing" : "idle";
+  
+  // Coin counters status
+  JsonObject countersObj = data.createNestedObject("coinCounters");
+  countersObj["p1"] = oneCounter.getCount();
+  countersObj["p5"] = fiveCounter.getCount();
+  countersObj["p10"] = tenCounter.getCount();
+  
+  countersObj["p1_dispensing"] = oneCounter.isDispensing();
+  countersObj["p5_dispensing"] = fiveCounter.isDispensing();
+  countersObj["p10_dispensing"] = tenCounter.isDispensing();
+  
+  serializeJson(systemInfoDoc, Serial);
+  Serial.println();
+}
 
-  unsigned long t0 = millis();
-  while (true) {
-    // update counters frequently to catch pulses and check timeout
-    oneCounter.update();
-    fiveCounter.update();
-    tenCounter.update();
-
-    if (c->hasReachedTarget()) {
-      relayOffForValue(value);
-      Serial.print(F("{\"ok\":true,\"cmd\":\"dispense_coin\",\"value\":"));
-      Serial.print(value);
-      Serial.print(F(",\"dispensed\":"));
-      Serial.print(count);
-      Serial.println(F("}"));
-      return true;
-    }
-    if (c->hasTimedOut() || (millis() - t0 > hardStopMs)) {
-      relayOffForValue(value);
-      Serial.print(F("{\"ok\":false,\"error\":\"coin_timeout\",\"value\":"));
-      Serial.print(value);
-      Serial.print(F(",\"counted\":"));
-      Serial.print(c->getCount());
-      Serial.println(F("}"));
-      return false;
-    }
-    // breathe
-    delay(2);
+/**
+ * Process a system-level command (not specific to any one module)
+ */
+void processSystemCommand(JsonDocument& doc) {
+  const char* cmd = doc["cmd"];
+  
+  if (strcmp(cmd, "status") == 0) {
+    sendSystemStatusJson();
+    sendSystemAck("status", true);
+  }
+  else if (strcmp(cmd, "reset") == 0) {
+    resetSystem();
+    sendSystemStatusJson();
+    sendSystemAck("reset", true);
+  }
+  else {
+    // Unknown system command
+    sendSystemAck(cmd, false, "unknown_command");
   }
 }
 
-// Greedy plan using 10,5,1 (change this if you add 20P hardware)
-void dispenseAmountPlan(int amount) {
-  if (amount <= 0) {
-    Serial.println(F("{\"ok\":true,\"cmd\":\"dispense_amount\",\"dispensed\":0}"));
-    return;
-  }
-  int plan10 = amount / 10; amount %= 10;
-  int plan5  = amount / 5;  amount %= 5;
-  int plan1  = amount;
-
-  bool ok = true;
-  if (plan10) ok &= dispenseCoinValue(10, plan10);
-  if (plan5)  ok &= dispenseCoinValue(5,  plan5);
-  if (plan1)  ok &= dispenseCoinValue(1,  plan1);
-
-  Serial.print(F("{\"ok\":"));
-  Serial.print(ok ? F("true") : F("false"));
-  Serial.print(F(",\"cmd\":\"dispense_amount\",\"p10\":"));
-  Serial.print(plan10);
-  Serial.print(F(",\"p5\":"));
-  Serial.print(plan5);
-  Serial.print(F(",\"p1\":"));
-  Serial.print(plan1);
-  Serial.println(F("}"));
-}
-
-void startCoinSlotISR() {
-  coinSlot.begin();  // sets pin & attachInterrupt                         // :contentReference[oaicite:12]{index=12}
-  Serial.println(F("{\"ok\":true,\"event\":\"coinslot_started\"}"));
-  Serial.flush();
-}
-
-void stopCoinSlotISR() {
-  detachInterrupt(digitalPinToInterrupt(COINS_PULSE_PIN));
-  Serial.println(F("{\"ok\":true,\"event\":\"coinslot_stopped\"}"));
-}
-
+/**
+ * Reset the entire system to initial state
+ */
 void resetSystem() {
-  // Stop all relays
-  relays.setRelay(1, true);
-  relays.setRelay(2, true);
-  relays.setRelay(3, true);
-
-  // Reset counters
+  // Reset all modules
+  coinSlot.detach();
+  
   oneCounter.reset();
   fiveCounter.reset();
   tenCounter.reset();
-
-  // Reset coin-in total via CoinSlot parser (uses its own command API)
-  coinSlot.processCommand(String("reset"));                                      // :contentReference[oaicite:13]{index=13}
-
-  Serial.println(F("{\"ok\":true,\"event\":\"system_reset\"}"));
+  
+  // Stop any ongoing operations
+  oneCounter.stopDispensing();
+  fiveCounter.stopDispensing();
+  tenCounter.stopDispensing();
+  
+  relayController.setRelay(1, true); // Turn OFF relay 1
+  relayController.setRelay(2, true); // Turn OFF relay 2
+  relayController.setRelay(3, true); // Turn OFF relay 3
+  
+  // Can't reset paper dispensers if they're mid-operation
+  // but they'll complete their current operation
 }
 
-/* ---------------- Setup / Loop ---------------- */
+/**
+ * Process an incoming serial line
+ */
+void processSerialLine(const String& line) {
+  if (line.length() == 0) return;
+  
+  // Try parsing as JSON first
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, line);
+  
+  if (!error && doc.containsKey("v") && doc.containsKey("target") && doc.containsKey("cmd")) {
+    // Valid JSON command - route to appropriate module
+    const char* target = doc["target"];
+    
+    if (strcmp(target, "CoinSlot") == 0) {
+      coinSlot.handleSerial(line);
+    }
+    else if (strcmp(target, "PaperDispenser") == 0) {
+      // Check name to route to correct dispenser
+      if (doc.containsKey("name")) {
+        const char* name = doc["name"];
+        if (strcmp(name, "a4Dispenser") == 0) {
+          paperDispenser1.handleSerial(line);
+        } 
+        else if (strcmp(name, "longDispenser") == 0) {
+          paperDispenser2.handleSerial(line);
+        }
+      } else {
+        // Default to paper dispenser 1
+        paperDispenser1.handleSerial(line);
+      }
+    }
+    else if (strcmp(target, "CoinCounter") == 0) {
+      // All coin counters check name in their handleSerial
+      oneCounter.handleSerial(line);
+      fiveCounter.handleSerial(line);
+      tenCounter.handleSerial(line);
+    }
+    else if (strcmp(target, "Relay") == 0) {
+      relayController.handleSerial(line);
+    }
+    else if (strcmp(target, "System") == 0) {
+      processSystemCommand(doc);
+    }
+    else {
+      sendSystemAck("unknown_target", false, target);
+    }
+    
+    return;
+  }
+  
+  // Not JSON or invalid JSON - try legacy commands
+  if (line == "status") {
+    sendSystemStatusJson();
+  }
+  else if (line == "reset") {
+    resetSystem();
+    sendSystemStatusJson();
+  }
+  else {
+    // Try letting each module handle the command
+    coinSlot.handleSerial(line);
+    paperDispenser1.handleSerial(line);
+    paperDispenser2.handleSerial(line);
+    oneCounter.handleSerial(line);
+    fiveCounter.handleSerial(line);
+    tenCounter.handleSerial(line);
+    relayController.handleSerial(line);
+  }
+}
+
+/**
+ * Print current system status to Serial (for debugging)
+ */
+void printSystemStatus() {
+  Serial.println(F("===== SYSTEM STATUS ====="));
+  
+  // Limit switch status
+  Serial.print(F("Paper1 Limit: "));
+  Serial.println(paperDispenser1.isLimitSwitchPressed() ? F("PRESSED") : F("RELEASED"));
+  Serial.print(F("Paper2 Limit: "));
+  Serial.println(paperDispenser2.isLimitSwitchPressed() ? F("PRESSED") : F("RELEASED"));
+
+  // Coin Counter status
+  Serial.print(F("Peso1: "));
+  Serial.print(oneCounter.getCount());
+  Serial.print(F(" - "));
+  Serial.println(oneCounter.isDispensing() ? F("DISPENSING") : F("IDLE"));
+  
+  Serial.print(F("Peso5: "));
+  Serial.print(fiveCounter.getCount());
+  Serial.print(F(" - "));
+  Serial.println(fiveCounter.isDispensing() ? F("DISPENSING") : F("IDLE"));
+  
+  Serial.print(F("Peso10: "));
+  Serial.print(tenCounter.getCount());
+  Serial.print(F(" - "));
+  Serial.println(tenCounter.isDispensing() ? F("DISPENSING") : F("IDLE"));
+  
+  Serial.println(F("========================="));
+}
+
+// ========== MAIN ARDUINO FUNCTIONS ==========
 
 void setup() {
-  Serial.begin(115200);
-  while (!Serial) { /* wait for USB */ }
-
-  relays.begin();                // initialize 3 relays (defaults: OFF/HIGH)     // :contentReference[oaicite:14]{index=14}
+  // Initialize serial communication
+  Serial.begin(SERIAL_BAUD);
+  delay(100);
+  
+  Serial.println(F("{\"v\":1,\"source\":\"System\",\"type\":\"event\",\"ts\":0,\"data\":{\"event\":\"boot\"}}"));
+  
+  // Setup buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Initialize modules
+  coinSlot.begin();
+  // Don't automatically attach the interrupt - wait for command
+  
+  // Short beep to indicate system is starting
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(100);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  paperDispenser1.begin();
+  paperDispenser2.begin();
+  
   oneCounter.begin();
   fiveCounter.begin();
   tenCounter.begin();
-  dispA4.begin();
-  dispLONG.begin();
-
-  // Don’t start coin ISR by default; wait for 'coinslot_start'
-  Serial.println(F("{\"event\":\"boot\",\"ready\":true}"));
+  relayController.begin();
+  
+  // Send initial status
+  sendSystemStatusJson();
 }
 
-String line;
-
 void loop() {
-  // Keep coin-in edge aggregator alive even when not inserting
-  coinSlot.handle();  // converts pulse bursts -> denomination + totals        // :contentReference[oaicite:15]{index=15}
-
-  // Keep coin-out counters updated
+  // Read and process serial commands
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    
+    // Add to buffer if not newline and we have space
+    if (c != '\n' && bufferIndex < BUFFER_SIZE - 1) {
+      serialBuffer[bufferIndex++] = c;
+    }
+    // Process line when we get newline or buffer is full
+    else {
+      serialBuffer[bufferIndex] = '\0'; // Null-terminate
+      String line = String(serialBuffer);
+      processSerialLine(line);
+      bufferIndex = 0; // Reset buffer
+    }
+  }
+  
+  // Update all modules
+  coinSlot.update();
+  paperDispenser1.update();
+  paperDispenser2.update();
   oneCounter.update();
   fiveCounter.update();
   tenCounter.update();
+  relayController.update();
+  
+  // Periodically send system status during activity
+  // Only if any subsystem is active to avoid flooding the serial
+  bool systemActive = coinSlot.isAttached() || 
+                      paperDispenser1.isDispensing() || 
+                      paperDispenser2.isDispensing() || 
+                      oneCounter.isDispensing() ||
+                      fiveCounter.isDispensing() ||
+                      tenCounter.isDispensing();
+                      
+  if (systemActive && (millis() - lastStatusTime >= STATUS_INTERVAL)) {
+    sendSystemStatusJson();
+    lastStatusTime = millis();
+  }
+  
+  // Give system some breathing room
+  delay(1);
+}
 
-  // Read a line from Serial
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c == '\n') {
-      line.trim();
-      if (line.length()) handleCommand(line);
-      line = "";
-    } else if (c != '\r') {
-      line += c;
-    }
+/**
+ * Handle specific states and transitions in the system
+ * This is where you could implement system-level logic
+ */
+void handleCurrentState() {
+  // Detect if all three coin counters are dispensing - this could indicate
+  // a "make change" operation is in progress
+  if (oneCounter.isDispensing() && fiveCounter.isDispensing() && tenCounter.isDispensing()) {
+    // Special case handling could go here
   }
 }
 
-/* ---------------- Command parser ----------------
-
-Supported commands (space-separated):
-
-  coinslot_start
-  coinslot_stop
-  paper A4 <n>
-  paper LONG <n>
-  dispense_coin <value> <count>    // value ∈ {1,5,10}
-  dispense_amount <amount>         // uses 10/5/1 greedy
-  get                               // forwarded to CoinSlot (reports inserted total)
-  reset                             // resets counters/relays/coin-in total
-
--------------------------------------------------- */
-
-void handleCommand(const String& cmd) {
-  if (cmd == "coinslot_start") { startCoinSlotISR(); return; }
-  if (cmd == "coinslot_stop")  { stopCoinSlotISR();  return; }
-  if (cmd == "reset")          { resetSystem();      return; }
-  if (cmd == "get")            { coinSlot.processCommand(String("get")); return; }  // Pi compatibility
-
-  if (cmd.startsWith("paper ")) {
-    // "paper A4 3" or "paper LONG 2"
-    String rest = cmd.substring(6);
-    rest.trim();
-    int sp = rest.indexOf(' ');
-    String kind = (sp == -1) ? rest : rest.substring(0, sp);
-    int qty = (sp == -1) ? 1 : rest.substring(sp + 1).toInt();
-    qty = max(1, qty);
-
-    if (kind.equalsIgnoreCase("A4")) {
-      dispA4.dispense(qty);      // blocking until complete                   // :contentReference[oaicite:16]{index=16}
-      Serial.println(F("{\"ok\":true,\"cmd\":\"paper\",\"type\":\"A4\"}"));
-    } else if (kind.equalsIgnoreCase("LONG")) {
-      dispLONG.dispense(qty);
-      Serial.println(F("{\"ok\":true,\"cmd\":\"paper\",\"type\":\"LONG\"}"));
+/**
+ * Handle a command to dispense paper
+ */
+void handlePaperDispenseCommand(JsonDocument& doc) {
+  if (doc.containsKey("value") && doc.containsKey("dispenser")) {
+    int amount = doc["value"];
+    int dispenser = doc["dispenser"];
+    
+    if (dispenser == 1) {
+      paperDispenser1.dispense(amount);
+    } else if (dispenser == 2) {
+      paperDispenser2.dispense(amount);
     } else {
-      Serial.println(F("{\"ok\":false,\"error\":\"unknown_paper\"}"));
+      // Default to first dispenser
+      paperDispenser1.dispense(amount);
     }
-    return;
+  } else {
+    // Missing parameters
+    systemInfoDoc.clear();
+    systemInfoDoc["v"] = 1;
+    systemInfoDoc["source"] = "System";
+    systemInfoDoc["type"] = "error";
+    systemInfoDoc["ts"] = millis();
+    
+    JsonObject data = systemInfoDoc.createNestedObject("data");
+    data["action"] = "dispense_paper";
+    data["error"] = "missing_parameters";
+    
+    serializeJson(systemInfoDoc, Serial);
+    Serial.println();
   }
+}
 
-  if (cmd.startsWith("dispense_coin ")) {
-    // "dispense_coin 5 2"
-    String rest = cmd.substring(String("dispense_coin ").length());
-    rest.trim();
-    int sp = rest.indexOf(' ');
-    int value = (sp == -1) ? rest.toInt() : rest.substring(0, sp).toInt();
-    int count = (sp == -1) ? 1 : rest.substring(sp + 1).toInt();
-    if (value == 1 || value == 5 || value == 10) {
-      dispenseCoinValue(value, max(1, count));
-    } else {
-      Serial.println(F("{\"ok\":false,\"error\":\"unsupported_value\"}"));
+/**
+ * Handle a command to dispense coins
+ */
+void handleCoinDispenseCommand(JsonDocument& doc) {
+  if (doc.containsKey("value") && doc.containsKey("coin_type")) {
+    int amount = doc["value"];
+    int coinType = doc["coin_type"];
+    
+    switch (coinType) {
+      case 1:
+        oneCounter.dispense(amount);
+        break;
+      case 5:
+        fiveCounter.dispense(amount);
+        break;
+      case 10:
+        tenCounter.dispense(amount);
+        break;
+      default:
+        // Invalid coin type
+        systemInfoDoc.clear();
+        systemInfoDoc["v"] = 1;
+        systemInfoDoc["source"] = "System";
+        systemInfoDoc["type"] = "error";
+        systemInfoDoc["ts"] = millis();
+        
+        JsonObject data = systemInfoDoc.createNestedObject("data");
+        data["action"] = "dispense_coin";
+        data["error"] = "invalid_coin_type";
+        
+        serializeJson(systemInfoDoc, Serial);
+        Serial.println();
     }
-    return;
+  } else {
+    // Missing parameters
+    systemInfoDoc.clear();
+    systemInfoDoc["v"] = 1;
+    systemInfoDoc["source"] = "System";
+    systemInfoDoc["type"] = "error";
+    systemInfoDoc["ts"] = millis();
+    
+    JsonObject data = systemInfoDoc.createNestedObject("data");
+    data["action"] = "dispense_coin";
+    data["error"] = "missing_parameters";
+    
+    serializeJson(systemInfoDoc, Serial);
+    Serial.println();
   }
-
-  if (cmd.startsWith("dispense_amount ")) {
-    int amount = cmd.substring(String("dispense_amount ").length()).toInt();
-    dispenseAmountPlan(max(0, amount));
-    return;
-  }
-
-  Serial.println(F("{\"ok\":false,\"error\":\"unknown_command\"}"));
 }

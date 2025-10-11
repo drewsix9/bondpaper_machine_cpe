@@ -3,10 +3,39 @@
 
 #include <Arduino.h>
 #include <ezButton.h>
+#include <ArduinoJson.h>
+#include "RelayHopper.h"
 
+/**
+ * CoinCounter - Controls and monitors coin counting mechanism
+ * Also controls the relay for the coin hopper associated with this counter
+ * 
+ * JSON Command Structure (Raspberry Pi → Arduino):
+ * {
+ *   "v": 1,                     // Protocol version
+ *   "target": "CoinCounter",    // Must be "CoinCounter" for this module
+ *   "cmd": "dispense",          // Command: "reset", "get", "dispense", "stop"
+ *   "name": "Counter",          // Name of the counter instance to target
+ *   "value": 10                 // Required for dispense command (number of coins)
+ * }
+ * 
+ * Example commands:
+ * {"v":1,"target":"CoinCounter","cmd":"dispense","name":"Counter","value":10}
+ * {"v":1,"target":"CoinCounter","cmd":"reset","name":"Counter"}
+ * {"v":1,"target":"CoinCounter","cmd":"get","name":"Counter"}
+ * {"v":1,"target":"CoinCounter","cmd":"stop","name":"Counter"}
+ *
+ * Legacy text commands are also supported:
+ * - counter_reset, counter_get, counter_dispense_<n>, counter_stop
+ */
 class CoinCounter {
 public:
+    // Constructor with relay hopper and relay number
+    CoinCounter(uint8_t counterPin, String name, RelayHopper* relayController, uint8_t relayNum);
+    
+    // Legacy constructor (for backward compatibility)
     CoinCounter(uint8_t counterPin, String name = "Counter");
+    
     void begin();
     void update();
     void reset();
@@ -23,19 +52,43 @@ public:
     void stopDispensing();
 
 private:
-    ezButton counterButton;
-    String counterName;
-    int currentCount;
-    int targetCount;
-    bool newCoinDetected;
-    bool dispensing;
-    bool targetReached;
-    bool timedOut;
-    unsigned long lastCoinTime;
-    const unsigned long debounceDelay = 10;
-    const unsigned long timeoutDuration = 3000; // Fixed 3 seconds
+    // Hardware
+    ezButton m_counterButton;           // Button object for coin sensor input
+    
+    // Basic properties
+    String m_strCounterName;            // Name of this counter instance
+    int m_nCurrentCount;                // Current count of coins detected
+    int m_nTargetCount;                 // Target number of coins to dispense
+    
+    // State flags (booleans)
+    bool m_bNewCoinDetected;            // Flag: new coin was detected
+    bool m_bDispensing;                 // Flag: currently dispensing coins
+    bool m_bTargetReached;              // Flag: dispensing target count reached
+    bool m_bTimedOut;                   // Flag: dispensing operation timed out
+    
+    // Relay control
+    RelayHopper* m_pRelayController;    // Pointer to relay controller
+    uint8_t m_nRelayNumber;             // Relay number for this counter (1-3)
+    bool m_bHasRelay;                   // Flag: has relay controller attached
+    
+    // Timing variables (milliseconds)
+    unsigned long m_ulLastCoinTime;     // Time when last coin was detected
+    unsigned long m_ulLastStatusTime;   // Time when last status was sent
+    
+    // Constants (milliseconds)
+    const unsigned long k_ulDebounceDelay = 10;      // Button debounce time
+    const unsigned long k_ulTimeoutDuration = 3000;  // Timeout after no coins (3s)
+    const unsigned long k_ulStatusInterval = 1000;   // Status update interval (1s)
     
     void checkTimeout();
+    void sendStatusJson();
+    void sendEventJson(const char* eventType, const char* event);
+    void sendTimeoutJson();
+    
+    // JSON command handling
+    void processJsonCommand(JsonDocument& doc);
+    void processLegacyCommand(const String& prefix);
+    void sendAckJson(const char* action, bool ok = true, int value = 0, const char* status = nullptr);
 };
 
 #endif // COINCOUNTER_H
