@@ -173,7 +173,6 @@ void loop() {
     if      (which == "SHORT") dispShort.dispenseSheets(n);
     else if (which == "LONG")  dispLong.dispenseSheets(n);
     else { Serial.println("ERR BADARG"); return; }
-    // (Silent by default; add "DONE PAPER ..." if you want an explicit completion line)
   }
   else if (cmd == "STATUS?") {
     // Simple snapshot; expand if you want more

@@ -58,5 +58,7 @@ void PaperDispenser::dispenseSheets(uint16_t count) {
     delay(100);
   }
 
+  Serial.println("DONE PAPER");
+
   rampDown();
 }
