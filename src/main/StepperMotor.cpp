@@ -157,6 +157,14 @@ PaperDispenser::PaperDispenser(uint8_t pulsePin, uint8_t dirPin, uint8_t in1Pin,
     m_ulLastStatusTime = 0;
     m_ulOperationStartTime = 0;
     m_ulRampDownStartTime = 0;
+    
+    // Initialize status tracking flags
+    m_bStatusUpdated = false;
+    m_bEventOccurred = false;
+    m_bErrorOccurred = false;
+    m_strLastEvent = "";
+    m_strLastError = "";
+    m_strLastErrorDetails = "";
 }
 
 void PaperDispenser::begin() {
@@ -178,18 +186,18 @@ void PaperDispenser::begin() {
     // Set initial state
     m_eState = IDLE;
     
-    // Send initial status
-    sendStatusJson();
+    // Set status flag for initial status
+    setStatusUpdated();
 }
 
 void PaperDispenser::update() {
     // Update state machine
     updateStateMachine();
     
-    // Send periodic status updates while active
+    // Set status flag for periodic status updates while active
     if (m_eState != IDLE && m_eState != COMPLETE && 
         (millis() - m_ulLastStatusTime >= k_ulStatusInterval)) {
-        sendStatusJson();
+        setStatusUpdated();
         m_ulLastStatusTime = millis();
     }
 }
@@ -234,8 +242,8 @@ void PaperDispenser::updateStateMachine() {
                 // Small delay between papers
                 delay(100);
                 
-                // Send updated status
-                sendStatusJson();
+                // Set status flag for updated status
+                setStatusUpdated();
             }
             break;
             
@@ -249,8 +257,9 @@ void PaperDispenser::updateStateMachine() {
                 m_eState = COMPLETE;
                 m_bOperationComplete = true;
                 
-                // Send completion event
-                sendEventJson("dispense_complete");
+                // Set event flag for completion
+                setEvent("dispense_complete");
+                setStatusUpdated();
             }
             break;
             
@@ -271,7 +280,7 @@ void PaperDispenser::updateStateMachine() {
 void PaperDispenser::dispense(int numOfPapers) {
     if (numOfPapers <= 0) {
         // Invalid number of papers
-        sendErrorJson("invalid_parameter", "Number of papers must be greater than zero");
+        setError("invalid_parameter", "Number of papers must be greater than zero");
         return;
     }
     
@@ -291,8 +300,8 @@ void PaperDispenser::dispense(int numOfPapers) {
     m_ulOperationStartTime = millis();
     m_ulLastStatusTime = millis();
     
-    // Send initial status
-    sendStatusJson();
+    // Set status flag for initial status
+    setStatusUpdated();
 }
 
 void PaperDispenser::stop() {
@@ -324,6 +333,59 @@ bool PaperDispenser::isDispensing() {
     return m_bDispensing;
 }
 
+// Status flag accessor methods
+bool PaperDispenser::hasStatusUpdate() const {
+    return m_bStatusUpdated;
+}
+
+bool PaperDispenser::hasEvent() const {
+    return m_bEventOccurred;
+}
+
+bool PaperDispenser::hasError() const {
+    return m_bErrorOccurred;
+}
+
+void PaperDispenser::clearStatusUpdate() {
+    m_bStatusUpdated = false;
+}
+
+void PaperDispenser::clearEvent() {
+    m_bEventOccurred = false;
+}
+
+void PaperDispenser::clearError() {
+    m_bErrorOccurred = false;
+}
+
+String PaperDispenser::getName() const {
+    return m_strName;
+}
+
+String PaperDispenser::getLastEvent() const {
+    return m_strLastEvent;
+}
+
+String PaperDispenser::getLastError() const {
+    return m_strLastError;
+}
+
+String PaperDispenser::getLastErrorDetails() const {
+    return m_strLastErrorDetails;
+}
+
+PaperDispenser::DispenserState PaperDispenser::getState() const {
+    return m_eState;
+}
+
+int PaperDispenser::getCurrentPaper() const {
+    return m_nCurrentPaper;
+}
+
+int PaperDispenser::getTotalPapers() const {
+    return m_nTotalPapers;
+}
+
 void PaperDispenser::dcMotorForward() {
     digitalWrite(m_nIn1Pin, HIGH);
     digitalWrite(m_nIn2Pin, LOW);
@@ -343,15 +405,15 @@ void PaperDispenser::waitForLimitSwitch() {
     unsigned long startTime = millis();
     
     while (!isLimitSwitchPressed()) {
-        // Send status every second
+        // Set status flag every second
         if (millis() - m_ulLastStatusTime >= k_ulStatusInterval) {
-            sendStatusJson();
+            setStatusUpdated();
             m_ulLastStatusTime = millis();
         }
         
         // Check for timeout (10 seconds)
         if (millis() - startTime > 10000) {
-            sendErrorJson("timeout", "Limit switch not triggered after timeout");
+            setError("timeout", "Limit switch not triggered after timeout");
             break;
         }
         
@@ -359,170 +421,88 @@ void PaperDispenser::waitForLimitSwitch() {
     }
 }
 
-void PaperDispenser::handleSerial(const String& line) {
-    // Try to parse as JSON
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, line);
+bool PaperDispenser::processCommand(const String& line, JsonDocument& doc) {
+    // Check if the command is already parsed as JSON
+    bool isParsed = (doc.size() > 0);
     
-    if (!error) {
-        // Check if this is a valid JSON command for PaperDispenser
-        if (doc.containsKey("v") && doc.containsKey("target") && doc.containsKey("cmd")) {
-            
-            // Check if it's for PaperDispenser and it's the right version
-            if (doc["v"] == 1 && strcmp(doc["target"], "PaperDispenser") == 0) {
+    if (!isParsed) {
+        // Try to parse as JSON
+        DeserializationError error = deserializeJson(doc, line);
+        if (error) {
+            return false; // Not valid JSON
+        }
+    }
+    
+    // Check if this is a valid JSON command for PaperDispenser
+    if (doc.containsKey("v") && doc.containsKey("target") && doc.containsKey("cmd")) {
+        // Check if it's for PaperDispenser and it's the right version
+        if (doc["v"] == 1 && strcmp(doc["target"], "PaperDispenser") == 0) {
+            // Only process commands for this specific dispenser instance if name is present
+            if (doc.containsKey("name")) {
+                const char* targetName = doc["name"];
+                if (strcmp(targetName, m_strName.c_str()) == 0) {
+                    processJsonCommand(doc);
+                    return true;
+                }
+                return false; // Command was for a different dispenser
+            } else {
+                // No name specified, assume it's for this dispenser
                 processJsonCommand(doc);
-                return;
+                return true;
             }
         }
     }
     
-    // No fallback to legacy commands for this module as it's new
+    return false; // Not handled
 }
 
 void PaperDispenser::processJsonCommand(JsonDocument& doc) {
     const char* cmdName = doc["cmd"];
     
-    // Check if name field is present and matches this instance
-    if (!doc.containsKey("name")) {
-        sendErrorJson("missing_parameter", "Name parameter is required to identify the dispenser");
-        return;
-    }
-    
-    // Only process commands for this specific dispenser instance
-    const char* targetName = doc["name"];
-    if (strcmp(targetName, m_strName.c_str()) != 0) {
-        // Command is for a different dispenser, ignore it
-        return;
-    }
-    
+    // We already checked for name in processCommand, so here we can just process the command
     if (strcmp(cmdName, "dispense") == 0) {
         if (doc.containsKey("value")) {
             int amount = doc["value"];
             dispense(amount);
-            sendAckJson("dispense", true, amount, "started");
+            // Status update will be sent from main.ino
         } else {
             // Missing value parameter
-            sendErrorJson("missing_parameter", "Value parameter is required for dispense command");
+            setError("missing_parameter", "Value parameter is required for dispense command");
         }
     } 
     else if (strcmp(cmdName, "stop") == 0) {
         stop();
-        sendAckJson("stop");
+        // Status update will be sent from main.ino
     } 
     else if (strcmp(cmdName, "setStepperSteps") == 0) {
         if (doc.containsKey("value")) {
             int steps = doc["value"];
             setStepperSteps(steps);
-            sendAckJson("setStepperSteps", true, steps);
+            // Status update will be sent from main.ino
         } else {
             // Missing value parameter
-            sendErrorJson("missing_parameter", "Value parameter is required for setStepperSteps command");
+            setError("missing_parameter", "Value parameter is required for setStepperSteps command");
         }
     }
     else {
         // Unknown command
-        sendErrorJson("unknown_command", "Command not recognized");
+        setError("unknown_command", "Command not recognized");
     }
 }
 
-void PaperDispenser::sendStatusJson() {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "PaperDispenser";
-    doc["type"] = "status";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strName;  // Include name of this dispenser instance
-    
-    // Set status based on current state
-    const char* statusText;
-    switch (m_eState) {
-        case IDLE:      statusText = "idle"; break;
-        case HOMING:    statusText = "homing"; break;
-        case DISPENSING: statusText = "in_progress"; break;
-        case RAMPING_DOWN: statusText = "ramping_down"; break;
-        case COMPLETE:  statusText = "complete"; break;
-        case ERROR:     statusText = "error"; break;
-        default:        statusText = "unknown";
-    }
-    
-    if (m_eState != IDLE) {
-        data["action"] = "dispense";
-        data["current"] = m_nCurrentPaper;
-        data["total"] = m_nTotalPapers;
-    }
-    
-    data["status"] = statusText;
-    
-    serializeJson(doc, Serial);
-    Serial.println();
+void PaperDispenser::setStatusUpdated() {
+    m_bStatusUpdated = true;
 }
 
-void PaperDispenser::sendEventJson(const char* event) {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "PaperDispenser";
-    doc["type"] = "event";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strName;  // Include name of this dispenser instance
-    data["event"] = event;
-    
-    if (m_nTotalPapers > 0) {
-        data["total"] = m_nTotalPapers;
-    }
-    
-    serializeJson(doc, Serial);
-    Serial.println();
+void PaperDispenser::setEvent(const String& event) {
+    m_bEventOccurred = true;
+    m_strLastEvent = event;
 }
 
-void PaperDispenser::sendErrorJson(const char* errorType, const char* details) {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "PaperDispenser";
-    doc["type"] = "error";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strName;  // Include name of this dispenser instance
-    data["error"] = errorType;
-    data["details"] = details;
-    
-    if (m_bDispensing) {
-        data["current"] = m_nCurrentPaper;
-        data["total"] = m_nTotalPapers;
-    }
-    
-    serializeJson(doc, Serial);
-    Serial.println();
+void PaperDispenser::setError(const String& errorType, const String& details) {
+    m_bErrorOccurred = true;
+    m_strLastError = errorType;
+    m_strLastErrorDetails = details;
 }
 
-void PaperDispenser::sendAckJson(const char* action, bool ok, int value, const char* status) {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "PaperDispenser";
-    doc["type"] = "ack";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strName;  // Include name of this dispenser instance
-    data["action"] = action;
-    data["ok"] = ok;
-    
-    if (value > 0) {
-        data["value"] = value;
-    }
-    
-    if (status != nullptr) {
-        data["status"] = status;
-    }
-    
-    serializeJson(doc, Serial);
-    Serial.println();
-}
+// Removed sendAckJson - acknowledgments will be handled by main.ino

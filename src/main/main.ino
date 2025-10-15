@@ -18,6 +18,7 @@
 #include "CoinCounter.h"
 #include "StepperMotor.h"
 #include "config.h"
+#include "SerialComm.h"
 // RelayHopper.h is now included through CoinCounter.h
 
 // ========== SYSTEM CONFIGURATION ==========
@@ -59,8 +60,9 @@ const int BUFFER_SIZE = 256;      // Serial buffer size
 char serialBuffer[BUFFER_SIZE];   // Buffer for incoming serial data
 int bufferIndex = 0;              // Current position in buffer
 
-// JSON document for system status and info
+// JSON documents for system status and commands
 StaticJsonDocument<512> systemInfoDoc;
+StaticJsonDocument<512> commandDoc;
 
 // ========== TIMING VARIABLES ==========
 unsigned long lastStatusTime = 0;
@@ -73,23 +75,7 @@ const unsigned long STATUS_INTERVAL = 5000;  // Status update every 5 seconds
  * aren't handled by specific modules
  */
 void sendSystemAck(const char* cmd, bool ok, const char* status = nullptr) {
-  systemInfoDoc.clear();
-  
-  systemInfoDoc["v"] = 1;
-  systemInfoDoc["source"] = "System";
-  systemInfoDoc["type"] = "ack";
-  systemInfoDoc["ts"] = millis();
-  
-  JsonObject data = systemInfoDoc.createNestedObject("data");
-  data["cmd"] = cmd;
-  data["ok"] = ok;
-  
-  if (status) {
-    data["status"] = status;
-  }
-  
-  serializeJson(systemInfoDoc, Serial);
-  Serial.println();
+  SerialComm::sendSystemAck(cmd, ok, status);
 }
 
 /**
@@ -124,8 +110,16 @@ void sendSystemStatusJson() {
   countersObj["p5_dispensing"] = fiveCounter.isDispensing();
   countersObj["p10_dispensing"] = tenCounter.isDispensing();
   
-  serializeJson(systemInfoDoc, Serial);
-  Serial.println();
+  // Relay status
+  JsonObject relaysObj = data.createNestedObject("relays");
+  // We use inverse logic where false = ON, true = OFF for relays
+  relaysObj["relay1"] = relayController.getRelayState(1) ? "OFF" : "ON";
+  relaysObj["relay2"] = relayController.getRelayState(2) ? "OFF" : "ON";
+  relaysObj["relay3"] = relayController.getRelayState(3) ? "OFF" : "ON";
+  
+  // Create a message and send through SerialComm
+  SerialMessage message("System", "status", &systemInfoDoc);
+  SerialComm::sendMessage(message);
 }
 
 /**
@@ -180,44 +174,159 @@ void processSerialLine(const String& line) {
   if (line.length() == 0) return;
   
   // Try parsing as JSON first
-  StaticJsonDocument<512> doc;
-  DeserializationError error = deserializeJson(doc, line);
+  commandDoc.clear();
+  DeserializationError error = deserializeJson(commandDoc, line);
   
-  if (!error && doc.containsKey("v") && doc.containsKey("target") && doc.containsKey("cmd")) {
+  if (!error && commandDoc.containsKey("v") && commandDoc.containsKey("target") && commandDoc.containsKey("cmd")) {
     // Valid JSON command - route to appropriate module
-    const char* target = doc["target"];
+    const char* target = commandDoc["target"];
+    bool handled = false;
     
     if (strcmp(target, "CoinSlot") == 0) {
-      coinSlot.handleSerial(line);
-    }
-    else if (strcmp(target, "PaperDispenser") == 0) {
-      // Check name to route to correct dispenser
-      if (doc.containsKey("name")) {
-        const char* name = doc["name"];
-        if (strcmp(name, "a4Dispenser") == 0) {
-          paperDispenser1.handleSerial(line);
-        } 
-        else if (strcmp(name, "longDispenser") == 0) {
-          paperDispenser2.handleSerial(line);
+      handled = coinSlot.processCommand(line, commandDoc);
+      
+      if (handled) {
+        const char* cmd = commandDoc["cmd"];
+        
+        if (strcmp(cmd, "reset") == 0) {
+          SerialComm::sendSystemAck("reset", true);
+        }
+        else if (strcmp(cmd, "attach") == 0) {
+          SerialComm::sendSystemAck("attach", true, coinSlot.isAttached() ? "attached" : "already_attached");
+        }
+        else if (strcmp(cmd, "detach") == 0) {
+          SerialComm::sendSystemAck("detach", true, "detached");
+        }
+        else if (strcmp(cmd, "get") == 0 || strcmp(cmd, "status") == 0) {
+          // Status update will be sent from main loop when flag is checked
+          SerialComm::sendSystemAck(cmd, true);
         }
       } else {
-        // Default to paper dispenser 1
-        paperDispenser1.handleSerial(line);
+        SerialComm::sendSystemAck("unknown_cmd", false);
+      }
+    }
+    else if (strcmp(target, "PaperDispenser") == 0) {
+      // Try both dispensers with the new processCommand method
+      handled = paperDispenser1.processCommand(line, commandDoc) ||
+                paperDispenser2.processCommand(line, commandDoc);
+                
+      // Send acknowledgment based on the command result
+      if (handled && commandDoc.containsKey("cmd") && commandDoc.containsKey("name")) {
+        const char* cmd = commandDoc["cmd"];
+        const char* name = commandDoc["name"];
+        
+        if (strcmp(cmd, "dispense") == 0 && commandDoc.containsKey("value")) {
+          int amount = commandDoc["value"];
+          SerialComm::sendPaperDispenserAck(name, "dispense", true, amount, "started");
+        }
+        else if (strcmp(cmd, "stop") == 0) {
+          SerialComm::sendPaperDispenserAck(name, "stop", true);
+        }
+        else if (strcmp(cmd, "setStepperSteps") == 0 && commandDoc.containsKey("value")) {
+          int steps = commandDoc["value"];
+          SerialComm::sendPaperDispenserAck(name, "setStepperSteps", true, steps);
+        }
+      }
+      else if (!handled && commandDoc.containsKey("name") && commandDoc.containsKey("cmd")) {
+        // Command was for PaperDispenser but not handled
+        const char* name = commandDoc["name"];
+        const char* cmd = commandDoc["cmd"];
+        
+        if (strcmp(cmd, "dispense") == 0 && !commandDoc.containsKey("value")) {
+          SerialComm::sendPaperDispenserError(name, "missing_parameter", "Value parameter is required", 0, 0);
+        }
+        else {
+          SerialComm::sendPaperDispenserAck(name, cmd, false, 0, "unknown_command");
+        }
       }
     }
     else if (strcmp(target, "CoinCounter") == 0) {
-      // All coin counters check name in their handleSerial
-      oneCounter.handleSerial(line);
-      fiveCounter.handleSerial(line);
-      tenCounter.handleSerial(line);
+      // Try all coin counters with the updated processCommand method
+      handled = oneCounter.processCommand(line, commandDoc) ||
+                fiveCounter.processCommand(line, commandDoc) ||
+                tenCounter.processCommand(line, commandDoc);
+                
+      // Send acknowledgment based on the command result
+      if (handled && commandDoc.containsKey("cmd") && commandDoc.containsKey("name")) {
+        const char* cmd = commandDoc["cmd"];
+        const char* name = commandDoc["name"];
+        
+        if (strcmp(cmd, "reset") == 0) {
+          SerialComm::sendCoinCounterAck(name, "reset", true);
+        }
+        else if (strcmp(cmd, "dispense") == 0 && commandDoc.containsKey("value")) {
+          int amount = commandDoc["value"];
+          SerialComm::sendCoinCounterAck(name, "dispense", true, amount, "started");
+        }
+        else if (strcmp(cmd, "stop") == 0) {
+          SerialComm::sendCoinCounterAck(name, "stop", true);
+        }
+      }
+      else if (!handled && commandDoc.containsKey("name") && commandDoc.containsKey("cmd")) {
+        // Command was for CoinCounter but not handled
+        const char* name = commandDoc["name"];
+        const char* cmd = commandDoc["cmd"];
+        
+        if (strcmp(cmd, "dispense") == 0 && !commandDoc.containsKey("value")) {
+          SerialComm::sendCoinCounterAck(name, "dispense", false, 0, "missing_value");
+        }
+        else {
+          SerialComm::sendCoinCounterAck(name, cmd, false, 0, "unknown_command");
+        }
+      }
     }
     else if (strcmp(target, "Relay") == 0) {
-      relayController.handleSerial(line);
+      handled = relayController.processCommand(line, commandDoc);
+      
+      if (handled) {
+        const char* cmd = commandDoc["cmd"];
+        
+        if (strcmp(cmd, "setRelay") == 0) {
+          int relayNum = commandDoc["value"];
+          const char* stateStr = commandDoc["state"];
+          bool state = (strcmp(stateStr, "off") == 0);  // ON = false, OFF = true
+          
+          // Send ACK through SerialComm
+          StaticJsonDocument<128> relayData;
+          relayData["relay"] = relayNum;
+          relayData["action"] = "set";
+          relayData["state"] = state ? "OFF" : "ON";
+          relayData["ok"] = true;
+          
+          SerialMessage relayMessage("Relay", "ack", &relayData);
+          SerialComm::sendMessage(relayMessage);
+        }
+        else if (strcmp(cmd, "get") == 0) {
+          // Status will be sent from the main loop when checking for status updates
+        }
+      }
+      else {
+        // Command failed
+        const char* cmd = commandDoc["cmd"];
+        if (strcmp(cmd, "setRelay") == 0) {
+          int relayNum = commandDoc.containsKey("value") ? commandDoc["value"] : 0;
+          
+          if (!commandDoc.containsKey("value") || !commandDoc.containsKey("state")) {
+            SerialComm::sendError("Relay", "setRelay", "missing_parameters");
+          }
+          else {
+            const char* stateStr = commandDoc["state"];
+            if (strcmp(stateStr, "on") != 0 && strcmp(stateStr, "off") != 0) {
+              SerialComm::sendError("Relay", "setRelay", "invalid_state");
+            }
+          }
+        }
+        else {
+          SerialComm::sendError("Relay", cmd, "unknown_command");
+        }
+      }
     }
     else if (strcmp(target, "System") == 0) {
-      processSystemCommand(doc);
+      processSystemCommand(commandDoc);
+      handled = true;
     }
-    else {
+    
+    if (!handled) {
       sendSystemAck("unknown_target", false, target);
     }
     
@@ -234,13 +343,24 @@ void processSerialLine(const String& line) {
   }
   else {
     // Try letting each module handle the command
-    coinSlot.handleSerial(line);
-    paperDispenser1.handleSerial(line);
-    paperDispenser2.handleSerial(line);
-    oneCounter.handleSerial(line);
-    fiveCounter.handleSerial(line);
-    tenCounter.handleSerial(line);
-    relayController.handleSerial(line);
+    // For CoinSlot, use the new approach
+    commandDoc.clear();
+    coinSlot.processCommand(line, commandDoc);
+    
+    // For PaperDispenser, use the new approach
+    commandDoc.clear();
+    paperDispenser1.processCommand(line, commandDoc);
+    paperDispenser2.processCommand(line, commandDoc);
+    
+    // For CoinCounter, use the new approach
+    commandDoc.clear();
+    oneCounter.processCommand(line, commandDoc);
+    fiveCounter.processCommand(line, commandDoc);
+    tenCounter.processCommand(line, commandDoc);
+    
+    // For RelayHopper, use the new approach
+    commandDoc.clear();
+    relayController.processCommand(line, commandDoc);
   }
 }
 
@@ -248,41 +368,22 @@ void processSerialLine(const String& line) {
  * Print current system status to Serial (for debugging)
  */
 void printSystemStatus() {
-  Serial.println(F("===== SYSTEM STATUS ====="));
-  
-  // Limit switch status
-  Serial.print(F("Paper1 Limit: "));
-  Serial.println(paperDispenser1.isLimitSwitchPressed() ? F("PRESSED") : F("RELEASED"));
-  Serial.print(F("Paper2 Limit: "));
-  Serial.println(paperDispenser2.isLimitSwitchPressed() ? F("PRESSED") : F("RELEASED"));
-
-  // Coin Counter status
-  Serial.print(F("Peso1: "));
-  Serial.print(oneCounter.getCount());
-  Serial.print(F(" - "));
-  Serial.println(oneCounter.isDispensing() ? F("DISPENSING") : F("IDLE"));
-  
-  Serial.print(F("Peso5: "));
-  Serial.print(fiveCounter.getCount());
-  Serial.print(F(" - "));
-  Serial.println(fiveCounter.isDispensing() ? F("DISPENSING") : F("IDLE"));
-  
-  Serial.print(F("Peso10: "));
-  Serial.print(tenCounter.getCount());
-  Serial.print(F(" - "));
-  Serial.println(tenCounter.isDispensing() ? F("DISPENSING") : F("IDLE"));
-  
-  Serial.println(F("========================="));
+  // Just send the system status JSON instead of custom format
+  // This ensures consistent output format
+  sendSystemStatusJson();
 }
 
 // ========== MAIN ARDUINO FUNCTIONS ==========
 
 void setup() {
-  // Initialize serial communication
-  Serial.begin(SERIAL_BAUD);
-  delay(100);
+  // Initialize serial communication through SerialComm
+  SerialComm::begin(SERIAL_BAUD);
   
-  Serial.println(F("{\"v\":1,\"source\":\"System\",\"type\":\"event\",\"ts\":0,\"data\":{\"event\":\"boot\"}}"));
+  // Create and send boot event
+  StaticJsonDocument<64> bootData;
+  bootData["event"] = "boot";
+  SerialMessage bootMessage("System", "event", &bootData);
+  SerialComm::sendMessage(bootMessage);
   
   // Setup buzzer
   pinMode(BUZZER_PIN, OUTPUT);
@@ -336,6 +437,220 @@ void loop() {
   tenCounter.update();
   relayController.update();
   
+  // Check for status updates from CoinSlot module
+  if (coinSlot.hasStatusUpdate()) {
+    StaticJsonDocument<128> coinSlotData;
+    coinSlotData["totalValue"] = coinSlot.getTotalValue();
+    coinSlotData["attached"] = coinSlot.isAttached();
+    
+    SerialMessage coinSlotMessage("CoinSlot", "status", &coinSlotData);
+    SerialComm::sendMessage(coinSlotMessage);
+    
+    coinSlot.clearStatusUpdate();
+  }
+  
+  // Check for events from CoinSlot module
+  if (coinSlot.hasEvent()) {
+    StaticJsonDocument<128> coinEventData;
+    coinEventData["coinValue"] = coinSlot.getLastCoinValue();
+    coinEventData["totalValue"] = coinSlot.getTotalValue();
+    
+    SerialMessage coinEventMessage("CoinSlot", "event", &coinEventData);
+    SerialComm::sendMessage(coinEventMessage);
+    
+    coinSlot.clearEvent();
+  }
+  
+  // Check for status updates from CoinCounter modules and send centralized messages
+  if (oneCounter.hasStatusUpdate()) {
+    SerialComm::sendCoinCounterStatus(
+      oneCounter.getName().c_str(),
+      oneCounter.getCurrentCount(),
+      oneCounter.getTargetCount(),
+      oneCounter.isDispensing()
+    );
+    oneCounter.clearStatusUpdate();
+  }
+  
+  if (fiveCounter.hasStatusUpdate()) {
+    SerialComm::sendCoinCounterStatus(
+      fiveCounter.getName().c_str(),
+      fiveCounter.getCurrentCount(),
+      fiveCounter.getTargetCount(),
+      fiveCounter.isDispensing()
+    );
+    fiveCounter.clearStatusUpdate();
+  }
+  
+  if (tenCounter.hasStatusUpdate()) {
+    SerialComm::sendCoinCounterStatus(
+      tenCounter.getName().c_str(),
+      tenCounter.getCurrentCount(),
+      tenCounter.getTargetCount(),
+      tenCounter.isDispensing()
+    );
+    tenCounter.clearStatusUpdate();
+  }
+  
+  // Check for status updates from RelayHopper module
+  if (relayController.hasStatusUpdate()) {
+    StaticJsonDocument<256> relayData;
+    
+    // Add relay states to the data document
+    JsonArray relayStates = relayData.createNestedArray("states");
+    // Fixed: using hardcoded 3 instead of getRelayCount since we have exactly 3 relays
+    for (int i = 1; i <= 3; i++) {
+      JsonObject relay = relayStates.createNestedObject();
+      relay["relay"] = i;
+      relay["state"] = relayController.getRelayState(i) ? "OFF" : "ON";  // ON = false, OFF = true
+    }
+    
+    SerialMessage relayMessage("Relay", "status", &relayData);
+    SerialComm::sendMessage(relayMessage);
+    
+    relayController.clearStatusUpdate();
+  }
+  
+  // Check for events from CoinCounter modules
+  if (oneCounter.hasEvent()) {
+    if (oneCounter.hasReachedTarget()) {
+      SerialComm::sendCoinCounterEvent(
+        oneCounter.getName().c_str(),
+        "target_reached",
+        oneCounter.getCurrentCount(),
+        oneCounter.getTargetCount()
+      );
+    } else if (oneCounter.hasTimedOut()) {
+      SerialComm::sendCoinCounterTimeout(
+        oneCounter.getName().c_str(),
+        oneCounter.getCurrentCount(),
+        oneCounter.getTargetCount()
+      );
+    }
+    oneCounter.clearEvent();
+  }
+  
+  if (fiveCounter.hasEvent()) {
+    if (fiveCounter.hasReachedTarget()) {
+      SerialComm::sendCoinCounterEvent(
+        fiveCounter.getName().c_str(),
+        "target_reached",
+        fiveCounter.getCurrentCount(),
+        fiveCounter.getTargetCount()
+      );
+    } else if (fiveCounter.hasTimedOut()) {
+      SerialComm::sendCoinCounterTimeout(
+        fiveCounter.getName().c_str(),
+        fiveCounter.getCurrentCount(),
+        fiveCounter.getTargetCount()
+      );
+    }
+    fiveCounter.clearEvent();
+  }
+  
+  if (tenCounter.hasEvent()) {
+    if (tenCounter.hasReachedTarget()) {
+      SerialComm::sendCoinCounterEvent(
+        tenCounter.getName().c_str(),
+        "target_reached",
+        tenCounter.getCurrentCount(),
+        tenCounter.getTargetCount()
+      );
+    } else if (tenCounter.hasTimedOut()) {
+      SerialComm::sendCoinCounterTimeout(
+        tenCounter.getName().c_str(),
+        tenCounter.getCurrentCount(),
+        tenCounter.getTargetCount()
+      );
+    }
+    tenCounter.clearEvent();
+  }
+  
+  // Check for status updates from PaperDispenser modules
+  if (paperDispenser1.hasStatusUpdate()) {
+    const char* statusText;
+    switch (paperDispenser1.getState()) {
+      case PaperDispenser::IDLE:      statusText = "idle"; break;
+      case PaperDispenser::HOMING:    statusText = "homing"; break;
+      case PaperDispenser::DISPENSING: statusText = "in_progress"; break;
+      case PaperDispenser::RAMPING_DOWN: statusText = "ramping_down"; break;
+      case PaperDispenser::COMPLETE:  statusText = "complete"; break;
+      case PaperDispenser::ERROR:     statusText = "error"; break;
+      default:        statusText = "unknown";
+    }
+    
+    SerialComm::sendPaperDispenserStatus(
+      paperDispenser1.getName().c_str(),
+      statusText,
+      paperDispenser1.getCurrentPaper(),
+      paperDispenser1.getTotalPapers()
+    );
+    paperDispenser1.clearStatusUpdate();
+  }
+  
+  if (paperDispenser2.hasStatusUpdate()) {
+    const char* statusText;
+    switch (paperDispenser2.getState()) {
+      case PaperDispenser::IDLE:      statusText = "idle"; break;
+      case PaperDispenser::HOMING:    statusText = "homing"; break;
+      case PaperDispenser::DISPENSING: statusText = "in_progress"; break;
+      case PaperDispenser::RAMPING_DOWN: statusText = "ramping_down"; break;
+      case PaperDispenser::COMPLETE:  statusText = "complete"; break;
+      case PaperDispenser::ERROR:     statusText = "error"; break;
+      default:        statusText = "unknown";
+    }
+    
+    SerialComm::sendPaperDispenserStatus(
+      paperDispenser2.getName().c_str(),
+      statusText,
+      paperDispenser2.getCurrentPaper(),
+      paperDispenser2.getTotalPapers()
+    );
+    paperDispenser2.clearStatusUpdate();
+  }
+  
+  // Check for events from PaperDispenser modules
+  if (paperDispenser1.hasEvent()) {
+    SerialComm::sendPaperDispenserEvent(
+      paperDispenser1.getName().c_str(),
+      paperDispenser1.getLastEvent().c_str(),
+      paperDispenser1.getTotalPapers()
+    );
+    paperDispenser1.clearEvent();
+  }
+  
+  if (paperDispenser2.hasEvent()) {
+    SerialComm::sendPaperDispenserEvent(
+      paperDispenser2.getName().c_str(),
+      paperDispenser2.getLastEvent().c_str(),
+      paperDispenser2.getTotalPapers()
+    );
+    paperDispenser2.clearEvent();
+  }
+  
+  // Check for errors from PaperDispenser modules
+  if (paperDispenser1.hasError()) {
+    SerialComm::sendPaperDispenserError(
+      paperDispenser1.getName().c_str(),
+      paperDispenser1.getLastError().c_str(),
+      paperDispenser1.getLastErrorDetails().c_str(),
+      paperDispenser1.getCurrentPaper(),
+      paperDispenser1.getTotalPapers()
+    );
+    paperDispenser1.clearError();
+  }
+  
+  if (paperDispenser2.hasError()) {
+    SerialComm::sendPaperDispenserError(
+      paperDispenser2.getName().c_str(),
+      paperDispenser2.getLastError().c_str(),
+      paperDispenser2.getLastErrorDetails().c_str(),
+      paperDispenser2.getCurrentPaper(),
+      paperDispenser2.getTotalPapers()
+    );
+    paperDispenser2.clearError();
+  }
+  
   // Periodically send system status during activity
   // Only if any subsystem is active to avoid flooding the serial
   bool systemActive = coinSlot.isAttached() || 
@@ -343,7 +658,10 @@ void loop() {
                       paperDispenser2.isDispensing() || 
                       oneCounter.isDispensing() ||
                       fiveCounter.isDispensing() ||
-                      tenCounter.isDispensing();
+                      tenCounter.isDispensing() ||
+                      relayController.hasStatusUpdate() ||
+                      paperDispenser1.hasStatusUpdate() ||
+                      paperDispenser2.hasStatusUpdate();
                       
   if (systemActive && (millis() - lastStatusTime >= STATUS_INTERVAL)) {
     sendSystemStatusJson();
@@ -384,18 +702,7 @@ void handlePaperDispenseCommand(JsonDocument& doc) {
     }
   } else {
     // Missing parameters
-    systemInfoDoc.clear();
-    systemInfoDoc["v"] = 1;
-    systemInfoDoc["source"] = "System";
-    systemInfoDoc["type"] = "error";
-    systemInfoDoc["ts"] = millis();
-    
-    JsonObject data = systemInfoDoc.createNestedObject("data");
-    data["action"] = "dispense_paper";
-    data["error"] = "missing_parameters";
-    
-    serializeJson(systemInfoDoc, Serial);
-    Serial.println();
+    SerialComm::sendError("System", "dispense_paper", "missing_parameters");
   }
 }
 
@@ -419,32 +726,10 @@ void handleCoinDispenseCommand(JsonDocument& doc) {
         break;
       default:
         // Invalid coin type
-        systemInfoDoc.clear();
-        systemInfoDoc["v"] = 1;
-        systemInfoDoc["source"] = "System";
-        systemInfoDoc["type"] = "error";
-        systemInfoDoc["ts"] = millis();
-        
-        JsonObject data = systemInfoDoc.createNestedObject("data");
-        data["action"] = "dispense_coin";
-        data["error"] = "invalid_coin_type";
-        
-        serializeJson(systemInfoDoc, Serial);
-        Serial.println();
+        SerialComm::sendError("System", "dispense_coin", "invalid_coin_type");
     }
   } else {
     // Missing parameters
-    systemInfoDoc.clear();
-    systemInfoDoc["v"] = 1;
-    systemInfoDoc["source"] = "System";
-    systemInfoDoc["type"] = "error";
-    systemInfoDoc["ts"] = millis();
-    
-    JsonObject data = systemInfoDoc.createNestedObject("data");
-    data["action"] = "dispense_coin";
-    data["error"] = "missing_parameters";
-    
-    serializeJson(systemInfoDoc, Serial);
-    Serial.println();
+    SerialComm::sendError("System", "dispense_coin", "missing_parameters");
   }
 }

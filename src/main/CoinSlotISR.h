@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "SerialComm.h"
 
 /**
  * CoinSlotISR - Handles coin acceptor input with Interrupt Service Routines
@@ -27,12 +28,24 @@ public:
     void update();                        // finalize coin after quiet window
 
     // String-based API (expects one complete line terminated by '\n')
+    // Legacy method - will be removed after refactoring
     void handleSerial(const String& line);
+    
+    // New method to process commands
+    bool processCommand(const String& cmd, JsonDocument& doc);
 
     static void coinPulseISR();           // ISR: updates s_* counters/flags only
     
     // ==== State tracking ====
     bool isAttached() const { return m_bIsAttached; }  // Check if interrupt is attached - now public
+    int getTotalValue() const { return s_nTotalValue; }
+    
+    // Status reporting methods
+    bool hasStatusUpdate() const { return m_bHasStatusUpdate; }
+    void clearStatusUpdate() { m_bHasStatusUpdate = false; }
+    bool hasEvent() const { return m_bHasEvent; }
+    void clearEvent() { m_bHasEvent = false; }
+    int getLastCoinValue() const { return m_nLastCoinValue; }
 
 private:
     // ==== Hardware ====
@@ -44,6 +57,11 @@ private:
     static volatile unsigned long s_ulLastPulseTime;
     static volatile bool         s_bCoinActive;
     static volatile int          s_nTotalValue;
+    
+    // Status reporting flags
+    bool m_bHasStatusUpdate;              // Flag: has new status to report
+    bool m_bHasEvent;                     // Flag: has new event to report
+    int m_nLastCoinValue;                 // Value of last detected coin
 
     // ==== Timing (ms) ====
     static const unsigned long k_ulCoinDetectTimeout = 300;  // group pulses as one coin
@@ -53,11 +71,6 @@ private:
     static int  getCoinValue(int count);
     static void finalizeCoin(int count);
 
-    void processJsonCommand(JsonDocument& doc);
+    bool processJsonCommand(JsonDocument& doc);
     void processLegacyCommand(const String& cmd);
-
-    // JSON senders (NDJSON)
-    static void sendEventJson(int value, int total);
-    static void sendAckJson(const char* action, bool ok, const char* status = nullptr);
-    void sendStatusJson();  // Changed from static to instance method
 };

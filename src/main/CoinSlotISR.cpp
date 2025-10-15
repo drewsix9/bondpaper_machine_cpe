@@ -3,7 +3,15 @@
 /**
  * Response JSON Formats (Arduino → Raspberry Pi):
  *
- * Event response (when coin is detected):
+ * Event response (when coin is d// ---- Static volatile (ISR-shared) ====
+volatile unsigned long CoinSlotISR::s_ulPulseCount   = 0;
+volatile unsigned long CoinSlotISR::s_ulLastPulseTime= 0;
+volatile bool         CoinSlotISR::s_bCoinActive     = false;
+volatile int          CoinSlotISR::s_nTotalValue     = 0;
+
+CoinSlotISR::CoinSlotISR(uint8_t pulsePin)
+: m_u8PulsePin(pulsePin), m_bIsAttached(false), 
+  m_bHasStatusUpdate(false), m_bHasEvent(false), m_nLastCoinValue(0) {}:
  * {
  *   "v": 1,
  *   "source": "CoinSlot",
@@ -135,6 +143,7 @@ void CoinSlotISR::detach() {
     if (m_bIsAttached) {
         detachInterrupt(digitalPinToInterrupt(m_u8PulsePin));
         m_bIsAttached = false;
+        m_bHasStatusUpdate = true; // Signal status change
     }
 }
 
@@ -143,6 +152,7 @@ bool CoinSlotISR::reattach() {
     if (!m_bIsAttached) {
         attachInterrupt(digitalPinToInterrupt(m_u8PulsePin), CoinSlotISR::coinPulseISR, FALLING);
         m_bIsAttached = true;
+        m_bHasStatusUpdate = true; // Signal status change
         return true;
     }
     return false;  // Already attached
@@ -158,25 +168,34 @@ void CoinSlotISR::update() {
     }
 }
 
-// ---- Serial NDJSON reader/dispatcher ----
+// ---- Legacy Serial handler (to be removed after refactoring) ----
 void CoinSlotISR::handleSerial(const String& line) {
-    String cmd = line;
-    cmd.trim();
-    if (cmd.length() == 0) return;
-
-    // Try JSON
+    // Forward to new processCommand method for compatibility during refactoring
     StaticJsonDocument<192> doc;
-    DeserializationError err = deserializeJson(doc, cmd);
+    processCommand(line, doc);
+}
+
+// ---- New command processor ----
+bool CoinSlotISR::processCommand(const String& cmd, JsonDocument& doc) {
+    String trimmedCmd = cmd;
+    trimmedCmd.trim();
+    if (trimmedCmd.length() == 0) return false;
+
+    bool handled = false;
+    
+    // Try JSON
+    DeserializationError err = deserializeJson(doc, trimmedCmd);
     if (!err && doc.containsKey("v") && doc.containsKey("target") && doc.containsKey("cmd")) {
         if (doc["v"] == 1 && strcmp(doc["target"], "CoinSlot") == 0) {
-            processJsonCommand(doc);
-            return;
+            handled = processJsonCommand(doc);
         }
-        // Ignore if target/version not for us
+    } else {
+        // Fallback: legacy text command ("get", "reset")
+        processLegacyCommand(trimmedCmd);
+        handled = true; // Assume handled for legacy commands
     }
-
-    // Fallback: legacy text command ("get", "reset")
-    processLegacyCommand(cmd);
+    
+    return handled;
 }
 
 // ---- ISR ----
@@ -205,100 +224,55 @@ int CoinSlotISR::getCoinValue(int count) {
 void CoinSlotISR::finalizeCoin(int count) {
     int value = getCoinValue(count);
     s_nTotalValue += value;
-    if(value > 0){
-      sendEventJson(value, s_nTotalValue);
+    if(value > 0) {
+      // Store the last coin value and set event flag instead of sending directly
+      ((CoinSlotISR*)nullptr)->m_nLastCoinValue = value; // Access non-static from static
+      ((CoinSlotISR*)nullptr)->m_bHasEvent = true;       // Set flag for main loop to handle
     }
 }
 
 // ---- JSON command processor ----
-void CoinSlotISR::processJsonCommand(JsonDocument& doc) {
+bool CoinSlotISR::processJsonCommand(JsonDocument& doc) {
     const char* cmd = doc["cmd"];
     if (!cmd) {
-        sendAckJson("unknown", false, "missing_cmd");
-        return;
+        return false;
     }
 
-    if (strcmp(cmd, "get") == 0) {
-        sendStatusJson();
-        // Optional: also ack
-        sendAckJson("get", true);
+    bool handled = true;
+
+    if (strcmp(cmd, "get") == 0 || strcmp(cmd, "status") == 0) {
+        m_bHasStatusUpdate = true;
     } else if (strcmp(cmd, "reset") == 0) {
         s_nTotalValue = 0;
-        sendStatusJson();
-        sendAckJson("reset", true);
+        m_bHasStatusUpdate = true;
     } else if (strcmp(cmd, "attach") == 0) {
         bool result = reattach();
-        sendAckJson("attach", true, result ? "attached" : "already_attached");
+        // Status update flag is set in reattach()
     } else if (strcmp(cmd, "detach") == 0) {
         detach();
-        sendAckJson("detach", true, "detached");
-    } else if (strcmp(cmd, "status") == 0) {
-        sendStatusJson();
+        // Status update flag is set in detach()
     } else {
-        sendAckJson(cmd, false, "unknown_cmd");
+        handled = false;
     }
+    
+    return handled;
 }
 
 // ---- Legacy command processor (text) ----
 void CoinSlotISR::processLegacyCommand(const String& cmd) {
-    if (cmd == "get") {
-        sendStatusJson();
+    if (cmd == "get" || cmd == "status") {
+        m_bHasStatusUpdate = true;
     } else if (cmd == "reset") {
         s_nTotalValue = 0;
-        sendStatusJson();
+        m_bHasStatusUpdate = true;
     } else if (cmd == "attach" || cmd == "coinslot_start") {
-        bool result = reattach();
-        sendAckJson("attach", true, result ? "attached" : "already_attached");
+        reattach();
+        // Status update flag is set in reattach()
     } else if (cmd == "detach" || cmd == "coinslot_stop") {
         detach();
-        sendAckJson("detach", true, "detached");
-    } else if (cmd == "status") {
-        sendStatusJson();
-    } else {
-        sendAckJson(cmd.c_str(), false, "unknown_cmd");
+        // Status update flag is set in detach()
     }
 }
 
-// ---- JSON senders (NDJSON) ----
-void CoinSlotISR::sendEventJson(int value, int total) {
-    StaticJsonDocument<192> doc;
-    doc["v"]      = 1;
-    doc["source"] = "CoinSlot";
-    doc["type"]   = "event";
-    doc["ts"]     = millis();
-
-    JsonObject d  = doc.createNestedObject("data");
-    d["coinValue"]  = value;
-    d["totalValue"] = total;
-
-    serializeJson(doc, Serial); Serial.println();
-}
-
-void CoinSlotISR::sendStatusJson() {
-    StaticJsonDocument<160> doc;
-    doc["v"]      = 1;
-    doc["source"] = "CoinSlot";
-    doc["type"]   = "status";
-    doc["ts"]     = millis();
-
-    JsonObject d  = doc.createNestedObject("data");
-    d["totalValue"] = s_nTotalValue;
-    d["attached"] = this->m_bIsAttached;  // Using instance member variable
-
-    serializeJson(doc, Serial); Serial.println();
-}
-
-void CoinSlotISR::sendAckJson(const char* action, bool ok, const char* status) {
-    StaticJsonDocument<192> doc;
-    doc["v"]      = 1;
-    doc["source"] = "CoinSlot";
-    doc["type"]   = "ack";
-    doc["ts"]     = millis();
-
-    JsonObject d  = doc.createNestedObject("data");
-    d["action"] = action;
-    d["ok"]     = ok;
-    if (status) d["status"] = status;
-
-    serializeJson(doc, Serial); Serial.println();
-}
+// These methods have been removed in favor of centralized serial handling
+// The main.ino file will now handle all serial communication using SerialComm

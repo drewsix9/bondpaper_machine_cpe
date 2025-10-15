@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "SerialComm.h"
 
 /**
  * RelayHopper - Controls relay modules for coin hoppers
@@ -30,8 +31,22 @@ public:
     void begin();
     void update();
     void setRelay(uint8_t relayNum, bool state);
+    
+    // Legacy method - will be removed after refactoring
     void handleSerial(const String& line);
+    
+    // New method to process commands
+    bool processCommand(const String& cmd, JsonDocument& doc);
+    
     bool getRelayState(uint8_t relayNum);
+    String getName() const { return m_strRelayName; }
+    
+    // Status reporting methods
+    bool hasStatusUpdate() const { return m_bHasStatusUpdate; }
+    void clearStatusUpdate() { m_bHasStatusUpdate = false; }
+    
+    // Get current relay states
+    bool* getRelayStates() { return m_bRelayStates; }
 
 private:
     // Hardware
@@ -41,20 +56,23 @@ private:
     String m_strRelayName;            // Name of this relay instance
     bool m_bRelayStates[3];           // Current state of each relay (true = OFF, false = ON)
     
+    // Status reporting flags
+    bool m_bHasStatusUpdate;          // Flag: has new status to report
+    
     // Timing variables (milliseconds)
     unsigned long m_ulLastStatusTime; // Time when last status was sent
     
     // Constants (milliseconds)
     const unsigned long k_ulStatusInterval = 1000;   // Status update interval (1s)
     
-    // JSON message helpers
-    void sendStatusJson();
-    void sendAckJson(const char* action, uint8_t relay, const char* state);
-    void sendErrorJson(const char* action, uint8_t relay, const char* errorMessage);
-    
-    // JSON command handling
-    void processJsonCommand(JsonDocument& doc);
+    // Command handling
+    bool processJsonCommand(JsonDocument& doc);
     void processLegacyCommand(const String& cmd);
+    
+    // Last command result tracking
+    uint8_t m_nLastRelayChanged;
+    bool m_bLastCommandSucceeded;
+    const char* m_pLastErrorMessage;
 };
 
 #endif // RELAYHOPPER_H

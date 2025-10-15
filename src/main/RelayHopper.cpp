@@ -43,7 +43,8 @@
  * }
  */
 RelayHopper::RelayHopper(uint8_t pin1, uint8_t pin2, uint8_t pin3, String name)
-    : m_strRelayName(name), m_ulLastStatusTime(0) {
+    : m_strRelayName(name), m_ulLastStatusTime(0), m_bHasStatusUpdate(false),
+      m_nLastRelayChanged(0), m_bLastCommandSucceeded(false), m_pLastErrorMessage(nullptr) {
     m_nRelayPins[0] = pin1;
     m_nRelayPins[1] = pin2;
     m_nRelayPins[2] = pin3;
@@ -60,8 +61,8 @@ void RelayHopper::begin() {
         digitalWrite(m_nRelayPins[i], HIGH); // Start with relays OFF
     }
     
-    // Send initial status
-    sendStatusJson();
+    // Signal that status should be sent
+    m_bHasStatusUpdate = true;
 }
 
 void RelayHopper::update() {
@@ -113,8 +114,12 @@ void RelayHopper::setRelay(uint8_t relayNum, bool state) {
         // Update internal state tracking
         m_bRelayStates[relayNum - 1] = state;
         
-        // For legacy command support, send standard acknowledgement
-        sendAckJson("set", relayNum, state ? "OFF" : "ON");
+        // Update last relay changed
+        m_nLastRelayChanged = relayNum;
+        m_bLastCommandSucceeded = true;
+        
+        // Signal that status should be updated
+        m_bHasStatusUpdate = true;
     }
 }
 
@@ -126,9 +131,15 @@ bool RelayHopper::getRelayState(uint8_t relayNum) {
 }
 
 void RelayHopper::handleSerial(const String& line) {
-    // Try to parse as JSON
+    // Forward to new processCommand method for compatibility during refactoring
     StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, line);
+    processCommand(line, doc);
+}
+
+bool RelayHopper::processCommand(const String& cmd, JsonDocument& doc) {
+    // Try to parse as JSON
+    DeserializationError error = deserializeJson(doc, cmd);
+    bool handled = false;
     
     if (!error) {
         // Check if this is a valid JSON command for RelayHopper
@@ -136,84 +147,33 @@ void RelayHopper::handleSerial(const String& line) {
             
             // Check if it's for RelayHopper and it's the right version
             if (doc["v"] == 1 && strcmp(doc["target"], "Relay") == 0) {
-                processJsonCommand(doc);
-                return;
+                handled = processJsonCommand(doc);
             }
         }
     }
     
-    // Fall back to the original command format if not JSON or not for us
-    processLegacyCommand(line);
-}
-
-void RelayHopper::sendStatusJson() {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "Relay";
-    doc["type"] = "status";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strRelayName;
-    
-    // Create array for relay states
-    JsonArray states = data.createNestedArray("states");
-    for (int i = 0; i < 3; i++) {
-        states.add(m_bRelayStates[i] ? "OFF" : "ON");
+    if (!handled) {
+        // Fall back to the original command format if not JSON or not for us
+        processLegacyCommand(cmd);
+        handled = true; // Assume legacy commands are always handled
     }
     
-    serializeJson(doc, Serial);
-    Serial.println();
+    return handled;
 }
 
-void RelayHopper::sendAckJson(const char* action, uint8_t relay, const char* state) {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "Relay";
-    doc["type"] = "ack";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["relay"] = relay;
-    data["action"] = action;
-    data["state"] = state;
-    data["ok"] = true;
-    
-    serializeJson(doc, Serial);
-    Serial.println();
-}
+// These methods have been removed in favor of centralized serial handling
+// The main.ino file will now handle all serial communication using SerialComm
 
-void RelayHopper::sendErrorJson(const char* action, uint8_t relay, const char* errorMessage) {
-    StaticJsonDocument<256> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "Relay";
-    doc["type"] = "error";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["action"] = action;
-    
-    if (relay > 0) {
-        data["relay"] = relay;
-    }
-    
-    data["error"] = errorMessage;
-    
-    serializeJson(doc, Serial);
-    Serial.println();
-}
-
-void RelayHopper::processJsonCommand(JsonDocument& doc) {
+bool RelayHopper::processJsonCommand(JsonDocument& doc) {
     const char* cmdName = doc["cmd"];
+    bool handled = true;
     
     if (strcmp(cmdName, "setRelay") == 0) {
         // Check for required parameters
         if (!doc.containsKey("value") || !doc.containsKey("state")) {
-            sendErrorJson("setRelay", 0, "missing_parameters");
-            return;
+            m_bLastCommandSucceeded = false;
+            m_pLastErrorMessage = "missing_parameters";
+            return false;
         }
         
         int relayNumber = doc["value"];
@@ -226,25 +186,33 @@ void RelayHopper::processJsonCommand(JsonDocument& doc) {
         } else if (strcmp(stateStr, "off") == 0) {
             state = true; // OFF = HIGH = true
         } else {
-            sendErrorJson("setRelay", relayNumber, "invalid_state");
-            return;
+            m_bLastCommandSucceeded = false;
+            m_pLastErrorMessage = "invalid_state";
+            m_nLastRelayChanged = relayNumber;
+            return false;
         }
         
         // Set the relay
         digitalWrite(m_nRelayPins[relayNumber - 1], state ? HIGH : LOW);
         m_bRelayStates[relayNumber - 1] = state;
         
-        // Send acknowledgement
-        sendAckJson("set", relayNumber, state ? "OFF" : "ON");
+        // Update status for main loop
+        m_nLastRelayChanged = relayNumber;
+        m_bLastCommandSucceeded = true;
+        m_bHasStatusUpdate = true;
     } 
     else if (strcmp(cmdName, "get") == 0) {
-        // Send current status
-        sendStatusJson();
+        // Signal status update
+        m_bHasStatusUpdate = true;
     }
     else {
         // Unknown command
-        sendErrorJson(cmdName, 0, "unknown_command");
+        m_bLastCommandSucceeded = false;
+        m_pLastErrorMessage = "unknown_command";
+        handled = false;
     }
+    
+    return handled;
 }
 
 void RelayHopper::processLegacyCommand(const String& cmd) {

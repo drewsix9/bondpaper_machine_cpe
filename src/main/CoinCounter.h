@@ -42,7 +42,9 @@ public:
     int getCount();
     String getName();
     bool hasNewCoin();
-    void handleSerial(const String& cmd);
+    
+    // New method to process commands (instead of handleSerial)
+    bool processCommand(const String& cmd, JsonDocument& doc);
     
     // Dispense function
     void dispense(int numberOfCoins);
@@ -50,6 +52,19 @@ public:
     bool hasTimedOut();
     bool isDispensing();
     void stopDispensing();
+    
+    // Status reporting methods
+    bool hasStatusUpdate();
+    void clearStatusUpdate();
+    bool hasEvent();
+    void clearEvent();
+    
+    // State getters for status reporting
+    int getCurrentCount() const { return m_nCurrentCount; }
+    int getTargetCount() const { return m_nTargetCount; }
+    bool getDispensing() const { return m_bDispensing; }
+    bool getTargetReached() const { return m_bTargetReached; }
+    bool getTimedOut() const { return m_bTimedOut; }
 
 private:
     // Hardware
@@ -75,20 +90,20 @@ private:
     unsigned long m_ulLastCoinTime;     // Time when last coin was detected
     unsigned long m_ulLastStatusTime;   // Time when last status was sent
     
+    // Status reporting flags
+    bool m_bHasStatusUpdate;            // Flag: has new status to report
+    bool m_bHasEvent;                   // Flag: has new event to report
+    
     // Constants (milliseconds)
     const unsigned long k_ulDebounceDelay = 10;      // Button debounce time
     const unsigned long k_ulTimeoutDuration = 3000;  // Timeout after no coins (3s)
     const unsigned long k_ulStatusInterval = 1000;   // Status update interval (1s)
     
     void checkTimeout();
-    void sendStatusJson();
-    void sendEventJson(const char* eventType, const char* event);
-    void sendTimeoutJson();
     
-    // JSON command handling
-    void processJsonCommand(JsonDocument& doc);
+    // Command processing helpers
     void processLegacyCommand(const String& prefix);
-    void sendAckJson(const char* action, bool ok = true, int value = 0, const char* status = nullptr);
+    bool processJsonCommand(JsonDocument& doc);
 };
 
 #endif // COINCOUNTER_H

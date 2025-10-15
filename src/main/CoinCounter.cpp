@@ -1,4 +1,5 @@
 #include "CoinCounter.h"
+#include "SerialComm.h"
 
 /**
  * Response JSON Formats (Arduino → Raspberry Pi):
@@ -101,14 +102,16 @@ CoinCounter::CoinCounter(uint8_t counterPin, String name, RelayHopper* relayCont
     : m_counterButton(counterPin), m_strCounterName(name), m_nCurrentCount(0), 
       m_nTargetCount(0), m_bNewCoinDetected(false), m_bDispensing(false),
       m_bTargetReached(false), m_bTimedOut(false), m_ulLastCoinTime(0), m_ulLastStatusTime(0),
-      m_pRelayController(relayController), m_nRelayNumber(relayNum), m_bHasRelay(true) {}
+      m_pRelayController(relayController), m_nRelayNumber(relayNum), m_bHasRelay(true),
+      m_bHasStatusUpdate(false), m_bHasEvent(false) {}
       
 // Legacy constructor (no relay control)
 CoinCounter::CoinCounter(uint8_t counterPin, String name)
     : m_counterButton(counterPin), m_strCounterName(name), m_nCurrentCount(0), 
       m_nTargetCount(0), m_bNewCoinDetected(false), m_bDispensing(false),
       m_bTargetReached(false), m_bTimedOut(false), m_ulLastCoinTime(0), m_ulLastStatusTime(0),
-      m_pRelayController(nullptr), m_nRelayNumber(0), m_bHasRelay(false) {}
+      m_pRelayController(nullptr), m_nRelayNumber(0), m_bHasRelay(false),
+      m_bHasStatusUpdate(false), m_bHasEvent(false) {}
 
 void CoinCounter::begin() {
     m_counterButton.setDebounceTime(k_ulDebounceDelay);
@@ -133,14 +136,14 @@ void CoinCounter::update() {
                 m_pRelayController->setRelay(m_nRelayNumber, true); // true = OFF for typical relay modules
             }
             
-            // Send the target reached event - this is a notification, not a command response
-            sendEventJson("event", "target_reached");
+            // Set event flag instead of sending directly
+            m_bHasEvent = true;
         }
     }
     
-    // Send periodic status updates while dispensing
+    // Update status flag instead of sending directly
     if (m_bDispensing && (millis() - m_ulLastStatusTime >= k_ulStatusInterval)) {
-        sendStatusJson();
+        m_bHasStatusUpdate = true;
         m_ulLastStatusTime = millis();
     }
     
@@ -159,8 +162,8 @@ void CoinCounter::checkTimeout() {
             m_pRelayController->setRelay(m_nRelayNumber, true); // true = OFF for typical relay modules
         }
         
-        // Keep sending timeout notifications - this is an event, not a command response
-        sendTimeoutJson();
+        // Set event flag instead of sending directly
+        m_bHasEvent = true;
     }
 }
 
@@ -173,7 +176,7 @@ void CoinCounter::reset() {
     m_nTargetCount = 0;
     m_ulLastCoinTime = 0;
     m_ulLastStatusTime = 0;
-    // Event will be sent by the command handler if needed
+    m_bHasStatusUpdate = true; // Signal that status should be updated
 }
 
 void CoinCounter::dispense(int numberOfCoins) {
@@ -195,8 +198,8 @@ void CoinCounter::dispense(int numberOfCoins) {
         m_pRelayController->setRelay(m_nRelayNumber, false); // false = ON for typical relay modules
     }
     
-    // Send initial status after starting
-    sendStatusJson();
+    // Signal that status should be updated
+    m_bHasStatusUpdate = true;
 }
 
 bool CoinCounter::hasReachedTarget() {
@@ -219,7 +222,8 @@ void CoinCounter::stopDispensing() {
         m_pRelayController->setRelay(m_nRelayNumber, true); // true = OFF for typical relay modules
     }
     
-    // Event will be sent by the command handler if needed
+    // Signal that status should be updated
+    m_bHasStatusUpdate = true;
 }
 
 int CoinCounter::getCount() {
@@ -238,9 +242,11 @@ bool CoinCounter::hasNewCoin() {
     return false;
 }
 
-void CoinCounter::handleSerial(const String& cmd) {
-    // Try to parse as JSON
-    StaticJsonDocument<200> doc;
+// New method to process commands (instead of handleSerial)
+bool CoinCounter::processCommand(const String& cmd, JsonDocument& doc) {
+    bool handled = false;
+    
+    // Check if it's a JSON command first
     DeserializationError error = deserializeJson(doc, cmd);
     
     if (!error) {
@@ -250,78 +256,39 @@ void CoinCounter::handleSerial(const String& cmd) {
             
             // Check if it's for CoinCounter and it's the right version
             if (doc["v"] == 1 && strcmp(doc["target"], "CoinCounter") == 0) {
-                processJsonCommand(doc);
-                return;
+                const char* targetName = doc["name"];
+                
+                // Only process commands for this counter
+                if (strcmp(targetName, m_strCounterName.c_str()) == 0) {
+                    handled = processJsonCommand(doc);
+                }
             }
         }
-    }
-    
-    // Fall back to the original command format if not JSON or not for us
-    processLegacyCommand(cmd);
-}
-
-void CoinCounter::sendStatusJson() {
-    StaticJsonDocument<200> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "CoinCounter";
-    doc["type"] = "status";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strCounterName;
-    data["count"] = m_nCurrentCount;
-    
-    if (m_bDispensing && m_nTargetCount > 0) {
-        data["target"] = m_nTargetCount;
-        data["status"] = "dispensing";
     } else {
-        data["status"] = "idle";
+        // Try legacy command format
+        processLegacyCommand(cmd);
+        handled = true; // Assume handled for legacy commands
     }
     
-    serializeJson(doc, Serial);
-    Serial.println();
+    return handled;
 }
 
-void CoinCounter::sendEventJson(const char* eventType, const char* event) {
-    StaticJsonDocument<200> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "CoinCounter";
-    doc["type"] = eventType;
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strCounterName;
-    data["event"] = event;
-    data["count"] = m_nCurrentCount;
-    
-    if (m_nTargetCount > 0) {
-        data["target"] = m_nTargetCount;
-    }
-    
-    serializeJson(doc, Serial);
-    Serial.println();
+// Status reporting methods
+bool CoinCounter::hasStatusUpdate() {
+    return m_bHasStatusUpdate;
 }
 
-void CoinCounter::sendTimeoutJson() {
-    StaticJsonDocument<200> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "CoinCounter";
-    doc["type"] = "error";
-    doc["ts"] = millis();
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strCounterName;
-    data["event"] = "timeout";
-    data["final"] = m_nCurrentCount;
-    data["target"] = m_nTargetCount;
-    
-    serializeJson(doc, Serial);
-    Serial.println();
+void CoinCounter::clearStatusUpdate() {
+    m_bHasStatusUpdate = false;
 }
 
+bool CoinCounter::hasEvent() {
+    return m_bHasEvent;
+}
+
+void CoinCounter::clearEvent() {
+    m_bHasEvent = false;
+}
 void CoinCounter::processLegacyCommand(const String& cmd) {
     // Get lowercase version of counter name for comparison
     String prefix = m_strCounterName;
@@ -333,71 +300,44 @@ void CoinCounter::processLegacyCommand(const String& cmd) {
 
     if (lowerCmd == prefix + "_reset") {
         reset();
-        sendAckJson("reset");
     } else if (lowerCmd == prefix + "_get") {
-        sendStatusJson();
+        m_bHasStatusUpdate = true;
     } else if (lowerCmd.startsWith(prefix + "_dispense_")) {
         int amount = lowerCmd.substring((prefix + "_dispense_").length()).toInt();
         dispense(amount);
-        sendAckJson("dispense", true, amount, "started");
     } else if (lowerCmd == prefix + "_stop") {
         stopDispensing();
-        sendAckJson("stop");
     }
 }
 
-void CoinCounter::processJsonCommand(JsonDocument& doc) {
+bool CoinCounter::processJsonCommand(JsonDocument& doc) {
     const char* cmdName = doc["cmd"];
-    const char* targetName = doc["name"];
-    
-    // Only process commands for this counter
-    if (strcmp(targetName, m_strCounterName.c_str()) != 0) {
-        return;
-    }
+    bool handled = true;
     
     if (strcmp(cmdName, "reset") == 0) {
         reset();
-        sendAckJson("reset");
+        // Status update flag is set in reset()
     } 
     else if (strcmp(cmdName, "get") == 0) {
-        sendStatusJson();
+        m_bHasStatusUpdate = true;
     } 
     else if (strcmp(cmdName, "dispense") == 0) {
         if (doc.containsKey("value")) {
             int amount = doc["value"];
             dispense(amount);
-            sendAckJson("dispense", true, amount, "started");
+            // Status update flag is set in dispense()
         } else {
             // Missing value parameter
-            sendAckJson("dispense", false, 0, "missing_value");
+            handled = false;
         }
     } 
     else if (strcmp(cmdName, "stop") == 0) {
         stopDispensing();
-        sendAckJson("stop");
+        // Status update flag is set in stopDispensing()
     }
-}
-
-void CoinCounter::sendAckJson(const char* action, bool ok, int value, const char* status) {
-    StaticJsonDocument<200> doc;
-    
-    doc["v"] = 1;
-    doc["source"] = "CoinCounter";
-    doc["type"] = "ack";
-    
-    JsonObject data = doc.createNestedObject("data");
-    data["name"] = m_strCounterName;
-    data["action"] = action;
-    data["ok"] = ok;
-    
-    if (value > 0) {
-        data["value"] = value;
+    else {
+        handled = false;
     }
     
-    if (status != nullptr) {
-        data["status"] = status;
-    }
-    
-    serializeJson(doc, Serial);
-    Serial.println();
+    return handled;
 }

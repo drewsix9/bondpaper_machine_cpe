@@ -47,7 +47,6 @@ public:
                    String name = "PaperDispenser");
     void begin();
     void update();
-    void handleSerial(const String& line);
     
     // Control methods
     void dispense(int numOfPapers);
@@ -56,6 +55,36 @@ public:
     void setStepperSteps(int steps);
     bool isLimitSwitchPressed();
     bool isDispensing();
+    
+    // Status flag methods
+    bool hasStatusUpdate() const;
+    bool hasEvent() const;
+    bool hasError() const;
+    void clearStatusUpdate();
+    void clearEvent();
+    void clearError();
+    
+    // State machine forward declaration
+    enum DispenserState {
+        IDLE,
+        HOMING,
+        DISPENSING,
+        RAMPING_DOWN,
+        COMPLETE,
+        ERROR
+    };
+    
+    // Status accessors
+    String getName() const;
+    String getLastEvent() const;
+    String getLastError() const;
+    String getLastErrorDetails() const;
+    DispenserState getState() const;
+    int getCurrentPaper() const;
+    int getTotalPapers() const;
+    
+    // New command processing method
+    bool processCommand(const String& line, JsonDocument& doc);
     
 private:
     // Hardware components
@@ -79,6 +108,14 @@ private:
     bool m_bOperationComplete;
     bool m_bStopped;
     
+    // Status tracking flags
+    bool m_bStatusUpdated;     // Indicates a status update is available
+    bool m_bEventOccurred;     // Indicates an event has occurred
+    bool m_bErrorOccurred;     // Indicates an error has occurred
+    String m_strLastEvent;     // The last event that occurred
+    String m_strLastError;     // The last error that occurred
+    String m_strLastErrorDetails; // Details about the last error
+    
     // Timing variables (milliseconds)
     unsigned long m_ulLastStatusTime;
     unsigned long m_ulOperationStartTime;
@@ -94,23 +131,14 @@ private:
     void dcMotorStop();
     void waitForLimitSwitch();
     
-    // State machine
-    enum DispenserState {
-        IDLE,
-        HOMING,
-        DISPENSING,
-        RAMPING_DOWN,
-        COMPLETE,
-        ERROR
-    };
+    // State machine instance
     DispenserState m_eState;
     void updateStateMachine();
     
-    // JSON message helpers
-    void sendStatusJson();
-    void sendEventJson(const char* event);
-    void sendErrorJson(const char* errorType, const char* details);
-    void sendAckJson(const char* action, bool ok = true, int value = 0, const char* status = nullptr);
+    // JSON message helpers - now set flags instead of writing to Serial
+    void setStatusUpdated();
+    void setEvent(const String& event);
+    void setError(const String& errorType, const String& details);
     
     // JSON command handling
     void processJsonCommand(JsonDocument& doc);
