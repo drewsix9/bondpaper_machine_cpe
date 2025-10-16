@@ -57,7 +57,6 @@ void PaperDispenser::dispenseSheets(uint16_t count) {
     stepper_.rotate(stepsPerSheet_, DIR_CW);
     delay(100);
   }
-
   Serial.println("DONE PAPER");
 
   rampDown();

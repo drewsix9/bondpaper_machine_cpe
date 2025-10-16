@@ -13,15 +13,30 @@ void HopperPayout::begin(uint8_t denom, const HopperPins& pins, uint16_t debounc
 
 bool HopperPayout::start(uint16_t n) {
   if (busy_) return false;
+  
+  if (n <= 0) {
+    Serial.print("Hopper ");
+    Serial.print(denom_);
+    Serial.println(" Invalid dispense amount");
+    return false;
+  }
+  
   target_   = n;
   count_    = 0;
-  busy_     = (n > 0);
+  busy_     = true;
   lastCoin_ = millis();
 
   // initial push
   on_();
   pulsing_    = true;
   pulseStart_ = millis();
+  
+  Serial.print("Hopper ");
+  Serial.print(denom_);
+  Serial.print(" Started dispensing ");
+  Serial.print(n);
+  Serial.println(" coins");
+  
   return true;
 }
 
@@ -29,6 +44,21 @@ void HopperPayout::stop() {
   off_();
   busy_    = false;
   pulsing_ = false;
+  Serial.print("Hopper ");
+  Serial.print(denom_);
+  Serial.println(" Stopped dispensing");
+}
+
+void HopperPayout::reset() {
+  count_ = 0;
+  target_ = 0;
+  busy_ = false;
+  pulsing_ = false;
+  lastCoin_ = 0;
+  off_();
+  Serial.print("Hopper ");
+  Serial.print(denom_);
+  Serial.println(" Reset");
 }
 
 void HopperPayout::loop() {
@@ -56,32 +86,44 @@ void HopperPayout::loop() {
     }
   }
 
-  // Coin detection (flip to isReleased() if your sensor logic is inverted)
+  // Coin detection with CoinCounter algorithm
   if (btn_->isPressed()) {
     count_++;
     lastCoin_ = now;
-
+    
+    // Print the count information
     Serial.print("OUT ");
-    Serial.println(denom_);
-
-    if (count_ >= target_) {
+    Serial.print(denom_);
+    Serial.print(" Count: ");
+    Serial.print(count_);
+    
+    if (busy_ && target_ > 0) {
+      Serial.print("/");
+      Serial.print(target_);
+    }
+    Serial.println();
+    
+    // Check if target is reached
+    if (busy_ && target_ > 0 && count_ >= target_) {
       stop();
       Serial.print("DONE ");
       Serial.print(denom_);
-      Serial.print(' ');
+      Serial.print(" TARGET REACHED! ");
       Serial.println(count_);
     }
   }
-
+  
   // Timeout watchdog
-  if ((now - lastCoin_) >= HOPPER_MAX_GAP_MS) {
-    stop();
-    Serial.print("ERR TIMEOUT ");
-    Serial.print(denom_);
-    Serial.print(' ');
-    Serial.print(count_);
-    Serial.print('/');
-    Serial.println(target_);
+  if (busy_) {
+    if ((now - lastCoin_) >= HOPPER_MAX_GAP_MS) {
+      stop();
+      Serial.print("ERR TIMEOUT ");
+      Serial.print(denom_);
+      Serial.print(" Final count: ");
+      Serial.print(count_);
+      Serial.print("/");
+      Serial.println(target_);
+    }
   }
 }
 

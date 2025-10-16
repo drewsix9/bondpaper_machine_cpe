@@ -14,6 +14,7 @@ public:
   void begin(uint8_t denom, const HopperPins& pins, uint16_t debounceMs = 10);
   bool start(uint16_t n);   // returns false if already busy
   void stop();              // abort (no DONE line)
+  void reset();             // reset all counters and state
   void loop();              // call in main loop()
   bool busy() const;
 

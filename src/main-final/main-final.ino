@@ -45,6 +45,15 @@ static String readLine() {
 
 void start_change(uint16_t amount) {
   if (change.active) return;
+  
+  // Reset all hoppers before starting
+  hop10.reset();
+  delay(100);
+  hop5.reset();
+  delay(100);
+  hop1.reset();
+  delay(100);
+  
   change.active = true;
   change.amt = amount;
   change.t10 = amount / 10; amount -= change.t10 * 10;
@@ -52,7 +61,8 @@ void start_change(uint16_t amount) {
   change.t1  = amount;
   change.stage = 10;
 
-  // Kick first needed hopper immediately
+  // Kick first needed hopper immediately with a short delay before starting
+  delay(200);
   if      (change.t10) { hop10.start(change.t10); }
   else if (change.t5)  { change.stage = 5;  hop5.start(change.t5); }
   else if (change.t1)  { change.stage = 1;  hop1.start(change.t1); }
@@ -63,8 +73,27 @@ void start_change(uint16_t amount) {
 }
 
 void stop_all_change() {
-  hop10.stop(); hop5.stop(); hop1.stop();
+  // Forcibly stop all hoppers
+  hop10.stop();
+  delay(50);
+  hop5.stop(); 
+  delay(50);
+  hop1.stop();
+  delay(50);
+  
+  // Now do a full reset of each hopper to ensure clean state
+  hop10.reset();
+  delay(100);
+  hop5.reset();
+  delay(100);
+  hop1.reset();
+  delay(100);
+  
+  // Completely reset change state to initial values
   change = ChangeState{}; // reset
+  
+  // Give the system a final moment to settle
+  delay(200);
 }
 
 // ---------- Setup ----------
@@ -102,6 +131,10 @@ void setup() {
 }
 
 // ---------- Loop ----------
+// Variables for tracking change activity and timeout detection
+static uint32_t lastChangeActivity = 0;
+static const uint32_t CHANGE_TIMEOUT_MS = 30000; // 30 seconds timeout for change operations
+
 void loop() {
   // Service modules
   acceptor.loop();          // classifies pulse bursts into 1/5/10/20 values (INSERTED)
@@ -109,18 +142,31 @@ void loop() {
 
   // Handle CHANGE progression when each hopper completes (DONE/ERR prints are produced by hopper)
   if (change.active) {
+    // Record activity when processing change
+    lastChangeActivity = millis();
+    
     if (change.stage == 10 && !hop10.busy()) {
       change.stage = 5;
+      // Add a delay before starting the next hopper
+      delay(500);  // 500ms delay between hoppers
       if      (change.t5) { hop5.start(change.t5); }
-      else if (change.t1) { change.stage = 1; hop1.start(change.t1); }
+      else if (change.t1) { change.stage = 1; delay(500); hop1.start(change.t1); }
       else { change.active = false; change.stage = 0; Serial.print("DONE CHANGE "); Serial.println(change.amt); }
     } else if (change.stage == 5 && !hop5.busy()) {
       change.stage = 1;
+      // Add a delay before starting the next hopper
+      delay(500);  // 500ms delay between hoppers
       if      (change.t1) { hop1.start(change.t1); }
       else { change.active = false; change.stage = 0; Serial.print("DONE CHANGE "); Serial.println(change.amt); }
     } else if (change.stage == 1 && !hop1.busy()) {
       change.active = false; change.stage = 0; Serial.print("DONE CHANGE "); Serial.println(change.amt);
     }
+  }
+  
+  // Check for stale change operations - reset if stuck for too long
+  if (change.active && (millis() - lastChangeActivity > CHANGE_TIMEOUT_MS)) {
+    stop_all_change();
+    Serial.println("ERR CHANGE_TIMEOUT");
   }
 
   // Read & handle one line of serial command (non-blocking)
@@ -154,13 +200,33 @@ void loop() {
     if (!ok) Serial.println("ERR BUSY");
   }
   else if (cmd == "CHANGE") {
-    if (hop1.busy() || hop5.busy() || hop10.busy() || change.active) { Serial.println("ERR BUSY"); return; }
+    // First ensure we're in a clean state
+    if (hop1.busy() || hop5.busy() || hop10.busy() || change.active) {
+      // Try to reset the system if it's stuck
+      stop_all_change();
+      
+      // Check again after reset attempt
+      if (hop1.busy() || hop5.busy() || hop10.busy() || change.active) {
+        Serial.println("ERR BUSY"); 
+        return;
+      }
+    }
+    
     int amt = rest.toInt();
     if (amt < 0) { Serial.println("ERR BADARG"); return; }
+    
+    // Fresh start of change dispensing
     start_change((uint16_t)amt);
   }
   else if (cmd == "STOP") {
     stop_all_change();
+    Serial.println("OK STOPPED");
+  }
+  else if (cmd == "RESET") {
+    // Full system reset command
+    stop_all_change();
+    acceptor.reset();
+    Serial.println("OK RESET");
   }
   else if (cmd == "PAPER") {
     // PAPER SHORT <n> | PAPER LONG <n>
