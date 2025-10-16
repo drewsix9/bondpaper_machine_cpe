@@ -44,7 +44,6 @@ static String readLine() {
 }
 
 void start_change(uint16_t amount) {
-  if (change.active) return;
   
   // Reset all hoppers before starting
   hop10.reset();
