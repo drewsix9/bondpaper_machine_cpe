@@ -216,6 +216,7 @@ void loop() {
     
     // Fresh start of change dispensing
     start_change((uint16_t)amt);
+    Serial.println("DONE CHANGE");
   }
   else if (cmd == "STOP") {
     stop_all_change();

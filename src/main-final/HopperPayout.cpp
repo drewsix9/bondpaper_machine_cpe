@@ -21,6 +21,15 @@ bool HopperPayout::start(uint16_t n) {
     return false;
   }
   
+  // Reset and clear button state first
+  if (btn_ != nullptr) {
+    // Ensure button state is cleared before starting
+    for (int i = 0; i < 5; i++) {
+      btn_->loop();
+      delay(5);
+    }
+  }
+  
   target_   = n;
   count_    = 0;
   busy_     = true;
@@ -36,6 +45,9 @@ bool HopperPayout::start(uint16_t n) {
   Serial.print(" Started dispensing ");
   Serial.print(n);
   Serial.println(" coins");
+  
+  // Short delay to ensure the actuator has time to activate before we start checking for coins
+  delay(100);
   
   return true;
 }
@@ -56,6 +68,16 @@ void HopperPayout::reset() {
   pulsing_ = false;
   lastCoin_ = 0;
   off_();
+  
+  // Reset and clear the button state
+  if (btn_ != nullptr) {
+    // Force the button to update its state
+    for (int i = 0; i < 5; i++) {
+      btn_->loop();
+      delay(5);  // Brief delay to allow the button to settle
+    }
+  }
+  
   Serial.print("Hopper ");
   Serial.print(denom_);
   Serial.println(" Reset");
@@ -86,8 +108,12 @@ void HopperPayout::loop() {
     }
   }
 
-  // Coin detection with CoinCounter algorithm
-  if (btn_->isPressed()) {
+  // Coin detection with improved algorithm
+  bool currentState = btn_->isPressed();
+  
+  // Only count when the button state changes from not pressed to pressed
+  // This prevents false triggers at the start of dispensing
+  if (currentState && !lastButtonState_ && (now - pulseStart_ > 150)) {
     count_++;
     lastCoin_ = now;
     
@@ -106,6 +132,9 @@ void HopperPayout::loop() {
     // Check if target is reached
     if (busy_ && target_ > 0 && count_ >= target_) {
       stop();
+      // Print standard completion message first
+      Serial.println("DONE HOPPER");
+      // Then print detailed information
       Serial.print("DONE ");
       Serial.print(denom_);
       Serial.print(" TARGET REACHED! ");
@@ -113,10 +142,16 @@ void HopperPayout::loop() {
     }
   }
   
+  // Update the last button state
+  lastButtonState_ = currentState;
+  
   // Timeout watchdog
   if (busy_) {
     if ((now - lastCoin_) >= HOPPER_MAX_GAP_MS) {
       stop();
+      // Print standard completion message first
+      Serial.println("DONE HOPPER");
+      // Then print error information
       Serial.print("ERR TIMEOUT ");
       Serial.print(denom_);
       Serial.print(" Final count: ");

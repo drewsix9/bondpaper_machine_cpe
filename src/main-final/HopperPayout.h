@@ -30,8 +30,9 @@ private:
   bool      busy_ = false;
   uint32_t  lastCoin_ = 0;
   
-  // Add missing member variables
+  // State tracking variables
   bool      pulsing_ = false;
   uint32_t  pulseStart_ = 0;
   uint32_t  coolStart_ = 0;
+  bool      lastButtonState_ = false;
 };
