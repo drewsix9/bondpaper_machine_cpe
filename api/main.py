@@ -362,7 +362,9 @@ async def dispense_change(amount: int):
     2. Resets the device 
     3. Calculates how many coins of each type are needed
     4. Dispenses coins from largest to smallest denomination
-    5. Returns the results or an error
+    5. Falls back to smaller denominations if larger denominations fail
+    6. Recursively handles remaining amounts until fully dispensed or all options exhausted
+    7. Returns the results or an error
     
     Args:
         amount: Total change amount to dispense in coins
@@ -375,40 +377,104 @@ async def dispense_change(amount: int):
     serial_manager.send_command("RESET", wait_for_response=False)
     time.sleep(1.0)  # Give the device time to reset
     
-    # Step 2: Calculate how many of each coin we need (10₱, 5₱, 1₱)
-    coin_counts = calculate_change_breakdown(amount)
+    # Track how much we've successfully dispensed
+    amount_dispensed = 0
+    remaining_amount = amount
     all_responses = []
     
-    # Step 3: Dispense coins in order: 10₱ first, then 5₱, then 1₱
-    for coin_value in sorted(coin_counts.keys(), reverse=True):
-        num_coins = coin_counts[coin_value]
-        
-        if num_coins > 0:
-            # Send command to dispense these coins
-            command = f"HOPPER {coin_value} {num_coins}"
-            result = serial_manager.send_command(command, wait_for_response=True, timeout=10.0)
-            
-            # Track response or error
-            if "error" in result:
-                all_responses.append(f"Error dispensing {num_coins} x {coin_value}₱ coins: {result['error']}")
-            else:
-                all_responses.extend(result.get("response", []))
-            
-            # Wait before next dispense operation
-            time.sleep(1.0)
+    # Keep track of which denominations are available/working
+    available_denominations = [10, 5, 1]
     
-    # Step 4: Check if we got any response at all
+    # Continue dispensing until there's nothing left or we've tried all options
+    while remaining_amount > 0 and available_denominations:
+        # Calculate how many of each available coin we need
+        coin_counts = {}
+        temp_remaining = remaining_amount
+        
+        for denom in sorted(available_denominations, reverse=True):
+            if temp_remaining >= denom:
+                count = temp_remaining // denom
+                coin_counts[denom] = count
+                temp_remaining -= count * denom
+        
+        # If we couldn't create any valid breakdown with available denominations, break
+        if not coin_counts:
+            all_responses.append(f"Cannot make change for remaining {remaining_amount}₱ with available denominations")
+            break
+        
+        # Try to dispense the calculated coins
+        dispensed_this_round = False
+        
+        # *** Keep track of which denominations have been tried in this round
+        tried_denominations = []
+        
+        for coin_value in sorted(coin_counts.keys(), reverse=True):
+            num_coins = coin_counts[coin_value]
+            
+            if num_coins > 0:
+                command = f"HOPPER {coin_value} {num_coins}"
+                result = serial_manager.send_command(command, wait_for_response=True, timeout=10.0)
+                
+                # Add this denomination to tried list
+                tried_denominations.append(coin_value)
+                
+                coins_dispensed = 0
+                if "error" not in result and "response" in result:
+                    responses = result.get("response", [])
+                    all_responses.extend(responses)
+                    
+                    # Count actual coins dispensed
+                    for line in responses:
+                        if f"OUT {coin_value}" in line:
+                            coins_dispensed += 1
+                    
+                    # Update amounts
+                    amount_dispensed += coins_dispensed * coin_value
+                    remaining_amount -= coins_dispensed * coin_value
+                    
+                    if coins_dispensed > 0:
+                        dispensed_this_round = True
+                    
+                    # If we dispensed fewer coins than requested, this denomination may be empty/faulty
+                    if coins_dispensed < num_coins:
+                        all_responses.append(f"Warning: Only dispensed {coins_dispensed}/{num_coins} coins of {coin_value}₱")
+                        if coins_dispensed == 0:
+                            # Remove this denomination from available options
+                            all_responses.append(f"Removing {coin_value}₱ from available denominations")
+                            available_denominations.remove(coin_value)
+                else:
+                    error_msg = f"Error dispensing {num_coins} x {coin_value}₱ coins: {result.get('error', 'Unknown error')}"
+                    all_responses.append(error_msg)
+                    # Remove this denomination from available options
+                    all_responses.append(f"Removing {coin_value}₱ from available denominations")
+                    if coin_value in available_denominations:
+                        available_denominations.remove(coin_value)
+                
+                time.sleep(1.0)  # Wait before next dispense operation
+        
+        # *** Change this check to verify if we've tried all available denominations
+        # If we tried all available denominations but couldn't dispense anything, we're stuck
+        if not dispensed_this_round and set(tried_denominations) == set(available_denominations):
+            all_responses.append(f"Failed to dispense any coins for remaining {remaining_amount}₱")
+            break
+    
+    # Step 5: Check if we got any response at all
     if not all_responses:
         raise HTTPException(
             status_code=500, 
             detail="No responses received from device while dispensing change"
         )
-
     
-    # Step 5: Return the results
+    # Add a completion message
+    if remaining_amount == 0:
+        all_responses.append("DONE CHANGE")
+        serial_manager.send_command("DONE CHANGE", wait_for_response=False)
+    
+    # Step 6: Return the results with actual amount dispensed
     return {
         "requested_amount": amount,
-        "expected_amount": amount,  # We expect to dispense the full amount
+        "dispensed_amount": amount_dispensed,  # What we actually dispensed
+        "remaining_amount": remaining_amount,  # What we failed to dispense
         "responses": all_responses
     }
 
