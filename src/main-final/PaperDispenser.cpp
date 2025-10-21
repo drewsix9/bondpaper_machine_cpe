@@ -5,7 +5,8 @@
 void PaperDispenser::begin(uint8_t in1, uint8_t in2, uint8_t enPWM,
                            uint8_t limitPin,
                            uint8_t pulsePin, uint8_t dirPin, uint16_t stepUs,
-                           long stepsPerSheet) {
+                           long stepsPerSheet,
+                           uint8_t paperPresencePin) {
   in1_ = in1; in2_ = in2; en_ = enPWM; limit_ = limitPin;
   pinMode(in1_, OUTPUT);
   pinMode(in2_, OUTPUT);
@@ -13,6 +14,10 @@ void PaperDispenser::begin(uint8_t in1, uint8_t in2, uint8_t enPWM,
   pinMode(limit_, INPUT_PULLUP);
   analogWrite(en_, 255); // ~80% (0..255) — tune as needed
   dcForward(false);
+
+  // Initialize paper presence detection
+  paperPresencePin_ = paperPresencePin;
+  pinMode(paperPresencePin_, INPUT_PULLUP);
 
   stepper_.begin(pulsePin, dirPin, stepUs);
   stepsPerSheet_ = stepsPerSheet;
@@ -60,4 +65,29 @@ void PaperDispenser::dispenseSheets(uint16_t count) {
   Serial.println("DONE PAPER");
 
   rampDown();
+}
+
+// Private helper: check if paper is present (switch pressed = LOW)
+bool PaperDispenser::paperPresent(uint8_t pin) {
+  return digitalRead(pin) == LOW;
+}
+
+// Private helper: check if no paper or sensor fault (switch open = HIGH)
+bool PaperDispenser::noPaperOrFault(uint8_t pin) {
+  return digitalRead(pin) == HIGH;
+}
+
+// Public: check if paper is present with optional status printing
+bool PaperDispenser::hasPaper(bool printStatus) {
+  bool hasIt = paperPresent(paperPresencePin_);
+  
+  if (printStatus) {
+    if (noPaperOrFault(paperPresencePin_)) {
+      Serial.println("NO PAPER / SENSOR OPEN");
+    } else {
+      Serial.println("Paper present");
+    }
+  }
+  
+  return hasIt;
 }

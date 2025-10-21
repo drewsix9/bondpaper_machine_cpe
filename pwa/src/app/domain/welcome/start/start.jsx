@@ -1,5 +1,6 @@
 import axios from "axios";
 import { Button } from "primereact/button";
+import { Dialog } from "primereact/dialog";
 import { ProgressSpinner } from "primereact/progressspinner";
 import React, { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
@@ -12,6 +13,8 @@ export default function Start() {
     useMainContext();
   const [amount, setAmount] = useState(0);
   const [dispensing, setDispensing] = useState(false);
+  const [showOutOfPaperDialog, setShowOutOfPaperDialog] = useState(false);
+  const [refundMessage, setRefundMessage] = useState("");
   const location = useLocation();
 
   // Update global payment page state when location changes
@@ -134,6 +137,40 @@ export default function Start() {
                   buyData?.paper === "A4" ? "SHORT" : buyData?.paper;
                 const count = buyData?.quantity || 1;
 
+                // **FINAL CHECK: Verify paper is still available before dispensing**
+                console.log(`Checking if ${paperType} paper is available...`);
+                const paperCheckRes = await axios.get(
+                  `${BASE_URL}/paper/${paperType}`
+                );
+
+                if (!paperCheckRes.data?.has_paper) {
+                  // Paper is out of stock!
+                  console.error(`${paperType} paper is out of stock!`);
+
+                  // Attempt full refund
+                  if (amount > 0) {
+                    console.log(`Attempting to refund ${amount} coins...`);
+                    try {
+                      const refundRes = await axios.post(
+                        `${BASE_URL}/change/${amount}`
+                      );
+                      console.log("Refund response:", refundRes.data);
+                      setRefundMessage(`Refunded ₱${amount}`);
+                    } catch (refundErr) {
+                      console.error("Refund failed:", refundErr);
+                      setRefundMessage("Refund failed - Please contact staff");
+                    }
+                  } else {
+                    setRefundMessage("No coins to refund");
+                  }
+
+                  // Show out of paper dialog
+                  setDispensing(false);
+                  setShowOutOfPaperDialog(true);
+                  return;
+                }
+
+                // Paper is available, proceed with dispensing
                 // Calculate change amount (will be used in done.jsx)
                 const changeAmount = amount - count;
                 console.log(
@@ -174,6 +211,53 @@ export default function Start() {
           </Button>
         )}
       </div>
+
+      {/* Out of Paper Dialog */}
+      <Dialog
+        visible={showOutOfPaperDialog}
+        onHide={() => {
+          setShowOutOfPaperDialog(false);
+          navigate("/");
+        }}
+        header="Out of Paper"
+        modal
+        style={{ width: "50vw" }}
+        contentStyle={{
+          padding: "2rem",
+          backgroundColor: "#ffffff", // ✅ solid white background
+        }}
+        maskStyle={{
+          backgroundColor: "rgba(0,0,0,0.6)", // ✅ darker backdrop
+        }}
+        className="rounded-xl shadow-lg" // optional: add border radius + shadow
+      >
+        <div className="flex flex-col items-center space-y-4">
+          <i className="pi pi-exclamation-triangle text-red-600 text-6xl"></i>
+          <h2 className="text-2xl font-bold text-center">
+            Paper Not Available
+          </h2>
+          <p className="text-xl text-center">
+            The selected paper type is currently out of stock.
+          </p>
+          {refundMessage && (
+            <p className="text-xl text-center font-semibold text-green-600">
+              {refundMessage}
+            </p>
+          )}
+          <p className="text-xl text-center font-semibold">
+            Please contact staff for assistance.
+          </p>
+          <Button
+            label="Return to Home"
+            onClick={() => {
+              setShowOutOfPaperDialog(false);
+              navigate("/");
+            }}
+            className="bg-blue-600 text-white px-6 py-3 text-xl rounded-md mt-4"
+            autoFocus
+          />
+        </div>
+      </Dialog>
     </div>
   );
 }

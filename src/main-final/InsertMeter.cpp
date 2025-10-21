@@ -18,14 +18,12 @@ void InsertMeter::isr() {
 }
 
 void InsertMeter::loop() {
-  
   // When pulses have stopped for COIN_BURST_TIMEOUT_MS, finalize as one coin
   if (pulses_ > 0 && (millis() - lastMs_ > 300)) {
     classify((int)pulses_);
     pulses_ = 0;  // Reset pulse counter for next coin
   }
 }
-
 
 void InsertMeter::classify(int p) {
   int coinValue = 0;

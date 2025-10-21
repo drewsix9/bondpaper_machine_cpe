@@ -117,7 +117,8 @@ void setup() {
     SHORT_DC_IN1, SHORT_DC_IN2, SHORT_DC_EN,
     SHORT_LIMIT_SWITCH,
     SHORT_PIN_PULSE, SHORT_PIN_DIR, SHORT_STEP_US,
-    SHORT_STEPS_PER_SHEET
+    SHORT_STEPS_PER_SHEET,
+    LIMIT_SHORT_PRES
   );
 
   // --- Paper: LONG module ---
@@ -125,7 +126,8 @@ void setup() {
     LONG_DC_IN1, LONG_DC_IN2, LONG_DC_EN,
     LONG_LIMIT_SWITCH,
     LONG_PIN_PULSE, LONG_PIN_DIR, LONG_STEP_US,
-    LONG_STEPS_PER_SHEET
+    LONG_STEPS_PER_SHEET,
+    LIMIT_LONG_PRES
   );
 }
 
@@ -239,6 +241,21 @@ void loop() {
     if      (which == "SHORT") dispShort.dispenseSheets(n);
     else if (which == "LONG")  dispLong.dispenseSheets(n);
     else { Serial.println("ERR BADARG"); return; }
+  }
+  else if (cmd == "PAPER?") {
+    // PAPER? SHORT | PAPER? LONG - check if paper is present
+    rest.trim();
+    if (rest == "SHORT") {
+      bool hasIt = dispShort.hasPaper(true);  // prints status
+      Serial.println(hasIt ? "1" : "0");
+    }
+    else if (rest == "LONG") {
+      bool hasIt = dispLong.hasPaper(true);   // prints status
+      Serial.println(hasIt ? "1" : "0");
+    }
+    else {
+      Serial.println("ERR BADARG");
+    }
   }
   else if (cmd == "STATUS?") {
     // Simple snapshot; expand if you want more

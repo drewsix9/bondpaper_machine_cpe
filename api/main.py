@@ -478,6 +478,43 @@ async def dispense_change(amount: int):
         "responses": all_responses
     }
 
+@app.get("/paper/{paper_type}")
+def check_paper(paper_type: str):
+    """
+    Check if paper is present
+    
+    Args:
+        paper_type: SHORT or LONG
+    
+    Returns:
+        Dictionary with has_paper boolean and status message
+    """
+    paper_type = paper_type.upper()
+    if paper_type not in ["SHORT", "LONG"]:
+        raise HTTPException(status_code=400, detail="Paper type must be SHORT or LONG")
+    
+    command = f"PAPER? {paper_type}"
+    result = serial_manager.send_command(command, timeout=2.0)
+    
+    if "error" in result:
+        return {"error": result["error"]}
+    
+    responses = result.get("response", [])
+    
+    # Look for the 1 or 0 response
+    has_paper = None
+    for line in responses:
+        if line == "1":
+            has_paper = True
+        elif line == "0":
+            has_paper = False
+    
+    return {
+        "paper_type": paper_type,
+        "has_paper": has_paper,
+        "responses": responses
+    }
+
 @app.post("/paper/{paper_type}/{count}")
 def dispense_paper(paper_type: str, count: int):
     """
