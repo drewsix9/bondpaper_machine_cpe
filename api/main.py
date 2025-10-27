@@ -560,6 +560,40 @@ def reset_device():
     
     return {"success": True, "message": "Device reset completed"}
 
+@app.post("/coinslot/{action}")
+def control_coinslot(action: str):
+    """
+    Enable or disable the coin slot acceptor
+    
+    Args:
+        action: "on" to enable coin acceptance, "off" to disable and reset counter
+    
+    Returns:
+        Success message or error
+    """
+    action = action.upper()
+    if action not in ["ON", "OFF"]:
+        raise HTTPException(status_code=400, detail="Action must be 'on' or 'off'")
+    
+    command = f"COINSLOT {action}"
+    result = serial_manager.send_command(command, wait_for_response=True, timeout=2.0)
+    
+    if "error" in result:
+        return {"error": result["error"]}
+    
+    responses = result.get("response", [])
+    
+    # Check for the expected response
+    expected_response = f"OK COINSLOT {'ENABLED' if action == 'ON' else 'DISABLED'}"
+    success = any(expected_response in line for line in responses)
+    
+    return {
+        "success": success,
+        "action": action.lower(),
+        "enabled": action == "ON",
+        "responses": responses
+    }
+
 @app.get("/logs")
 def get_logs(lines: int = 50):
     """Get the most recent serial communication logs

@@ -24,15 +24,38 @@ export default function Start() {
     console.log(`Setting global isPaymentPage: ${currentlyOnPaymentPage}`);
   }, [location.pathname, setIsPaymentPage]);
 
-  // Payment screen entry/exit handling
+  // Payment screen entry/exit handling with coinslot control
   useEffect(() => {
     if (!isPaymentPage) return; // Skip if not on payment page
 
-    console.log("Payment screen entered");
+    console.log("Payment screen entered - enabling coinslot");
+
+    // Enable coinslot when entering payment page
+    const enableCoinslot = async () => {
+      try {
+        const res = await axios.post(`${BASE_URL}/coinslot/on`);
+        console.log("Coinslot enabled:", res.data);
+      } catch (err) {
+        console.error("Failed to enable coinslot:", err);
+      }
+    };
+
+    enableCoinslot();
 
     return () => {
-      console.log("Payment screen exited");
-      // No need to do anything when exiting the page
+      console.log("Payment screen exited - disabling coinslot");
+
+      // Disable coinslot when exiting payment page
+      const disableCoinslot = async () => {
+        try {
+          const res = await axios.post(`${BASE_URL}/coinslot/off`);
+          console.log("Coinslot disabled:", res.data);
+        } catch (err) {
+          console.error("Failed to disable coinslot:", err);
+        }
+      };
+
+      disableCoinslot();
     };
   }, [isPaymentPage]);
 
@@ -128,6 +151,15 @@ export default function Start() {
                 // First, stop the coin polling interval
                 console.log("Buy button clicked. Stopping coin polling...");
                 stopPolling();
+
+                // Disable coinslot immediately to prevent more coins being inserted
+                console.log("Disabling coinslot...");
+                try {
+                  await axios.post(`${BASE_URL}/coinslot/off`);
+                  console.log("Coinslot disabled successfully");
+                } catch (coinslotErr) {
+                  console.error("Failed to disable coinslot:", coinslotErr);
+                }
 
                 // Set loading state
                 setDispensing(true);

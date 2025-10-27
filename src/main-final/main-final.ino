@@ -11,8 +11,15 @@
 // Coin acceptor (coins INSERTED)
 InsertMeter acceptor;
 
+// Coin slot enable state
+bool coinSlotEnabled = false;  // Start disabled (LOW) on boot
+
 // ISR thunk for coin acceptor
-void ISR_acceptor() { acceptor.isr(); }
+void ISR_acceptor() { 
+  if (coinSlotEnabled) {
+    acceptor.isr();
+  }
+}
 
 // Hoppers (coins DISPENSED / change return)
 HopperPayout hop1, hop5, hop10;
@@ -98,6 +105,10 @@ void stop_all_change() {
 // ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
+
+  // --- Coin slot enable pin (start disabled) ---
+  pinMode(PIN_COIN_ENABLE, OUTPUT);
+  digitalWrite(PIN_COIN_ENABLE, HIGH);  // Disabled on boot (inverted logic)
 
   // --- Coin acceptor input & ISR ---
   pinMode(PIN_COIN_PULSE, INPUT_PULLUP);
@@ -252,6 +263,23 @@ void loop() {
     else if (rest == "LONG") {
       bool hasIt = dispLong.hasPaper(true);   // prints status
       Serial.println(hasIt ? "1" : "0");
+    }
+    else {
+      Serial.println("ERR BADARG");
+    }
+  }
+  else if (cmd == "COINSLOT") {
+    rest.trim();
+    if (rest == "ON") {
+      digitalWrite(PIN_COIN_ENABLE, LOW);  // Inverted: LOW = enabled
+      coinSlotEnabled = true;
+      Serial.println("OK COINSLOT ENABLED");
+    }
+    else if (rest == "OFF") {
+      digitalWrite(PIN_COIN_ENABLE, HIGH);  // Inverted: HIGH = disabled
+      coinSlotEnabled = false;
+      acceptor.reset();  // Reset counter when disabling
+      Serial.println("OK COINSLOT DISABLED");
     }
     else {
       Serial.println("ERR BADARG");
