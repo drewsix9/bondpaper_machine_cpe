@@ -1,0 +1,56 @@
+{"v": 1,"target": "CoinSlot","cmd": "status"}
+
+{"v": 1,"target": "CoinSlot","cmd": "attach"}
+
+{"v": 1,"target": "CoinSlot","cmd": "detach"}
+
+{"v": 1,"target": "PaperDispenser","cmd": "dispense","name": "a4Dispenser","value": 2}
+
+{"v": 1,"target": "PaperDispenser","cmd": "dispense","name": "longDispenser","value": 2}
+
+{"v": 1,"target": "CoinCounter","cmd": "dispense","name": "Peso1","value": 19}
+{"v": 1,"target": "CoinCounter","cmd": "dispense","name": "Peso5","value": 3}
+{"v": 1,"target": "CoinCounter","cmd": "dispense","name": "Peso10","value": 2}
+
+
+// System Commands
+{"v":1,"target":"System","cmd":"status"}
+{"v":1,"target":"System","cmd":"reset"}
+
+// CoinSlot Commands
+{"v":1,"target":"CoinSlot","cmd":"attach"}
+{"v":1,"target":"CoinSlot","cmd":"detach"}
+{"v":1,"target":"CoinSlot","cmd":"reset"}
+{"v":1,"target":"CoinSlot","cmd":"get"}
+{"v":1,"target":"CoinSlot","cmd":"status"}
+
+
+// PaperDispenser Commands
+{"v":1,"target":"PaperDispenser","name":"a4Dispenser","cmd":"dispense","value":1}
+{"v":1,"target":"PaperDispenser","name":"longDispenser","cmd":"dispense","value":1}
+{"v":1,"target":"PaperDispenser","name":"a4Dispenser","cmd":"stop"}
+{"v":1,"target":"PaperDispenser","name":"longDispenser","cmd":"stop"}
+{"v":1,"target":"PaperDispenser","name":"a4Dispenser","cmd":"setStepperSteps","value":1000}
+{"v":1,"target":"PaperDispenser","name":"longDispenser","cmd":"setStepperSteps","value":1000}
+
+
+// CoinCounter Commands
+{"v":1,"target":"CoinCounter","name":"Peso1","cmd":"reset"}
+{"v":1,"target":"CoinCounter","name":"Peso5","cmd":"reset"}
+{"v":1,"target":"CoinCounter","name":"Peso10","cmd":"reset"}
+{"v":1,"target":"CoinCounter","name":"Peso1","cmd":"dispense","value":5}
+{"v":1,"target":"CoinCounter","name":"Peso5","cmd":"dispense","value":5}
+{"v":1,"target":"CoinCounter","name":"Peso10","cmd":"dispense","value":5}
+{"v":1,"target":"CoinCounter","name":"Peso1","cmd":"stop"}
+{"v":1,"target":"CoinCounter","name":"Peso5","cmd":"stop"}
+{"v":1,"target":"CoinCounter","name":"Peso10","cmd":"stop"}
+
+
+// Relay Commands
+{"v":1,"target":"Relay","cmd":"setRelay","value":1,"state":"on"}
+{"v":1,"target":"Relay","cmd":"setRelay","value":1,"state":"off"}
+{"v":1,"target":"Relay","cmd":"setRelay","value":2,"state":"on"}
+{"v":1,"target":"Relay","cmd":"setRelay","value":2,"state":"off"}
+{"v":1,"target":"Relay","cmd":"setRelay","value":3,"state":"on"}
+{"v":1,"target":"Relay","cmd":"setRelay","value":3,"state":"off"}
+{"v":1,"target":"Relay","cmd":"get"}

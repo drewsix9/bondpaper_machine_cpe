@@ -1,0 +1,121 @@
+# Bond Paper Machine Commands Reference
+# =====================================
+# All commands are case-sensitive and sent via Serial at 9600 baud
+# Commands should be terminated with newline (\n) or carriage return (\r)
+
+# ========== COIN ACCEPTOR COMMANDS ==========
+
+# Query total inserted coins
+COINS?
+# Response: Returns total amount of coins inserted (integer)
+
+# Reset coin acceptor counter to zero
+COINS=RST
+# Response: No response (silent operation)
+
+# ========== HOPPER PAYOUT COMMANDS ==========
+
+# Dispense specific number of coins from specific denomination hopper
+HOPPER <denomination> <count>
+# denomination: 1, 5, or 10 (coin values)
+# count: number of coins to dispense (positive integer)
+# Examples:
+HOPPER 1 5      # Dispense 5 coins of value 1
+HOPPER 5 3      # Dispense 3 coins of value 5  
+HOPPER 10 2     # Dispense 2 coins of value 10
+# Response on success: "OUT <denom>" for each coin dispensed, "DONE <denom> <count>" when complete
+# Response on error: "ERR BUSY" if hopper already running, "ERR BADARG" for invalid parameters
+# Response on timeout: "ERR TIMEOUT <denom> <dispensed>/<target>"
+
+# ========== CHANGE DISPENSING COMMANDS ==========
+
+# Automatically calculate and dispense change for given amount
+CHANGE <amount>
+# amount: total change amount to dispense (positive integer)
+# System automatically calculates optimal coin distribution (10s, 5s, 1s)
+# Examples:
+CHANGE 23       # Dispenses 2×10 + 0×5 + 3×1
+CHANGE 17       # Dispenses 1×10 + 1×5 + 2×1
+CHANGE 8        # Dispenses 0×10 + 1×5 + 3×1
+# Response: "OUT <denom>" for each coin, "DONE CHANGE <amount>" when complete
+# Response on error: "ERR BUSY" if hoppers already running, "ERR BADARG" for invalid amount
+
+# Stop all hopper operations (emergency stop)
+STOP
+# Response: No response (silent operation)
+# Note: Immediately stops all hoppers and resets change state machine
+
+# ========== PAPER DISPENSER COMMANDS ==========
+
+# Dispense paper sheets
+PAPER <type> <count>
+# type: SHORT or LONG (paper types)
+# count: number of sheets to dispense (positive integer)
+# Examples:
+PAPER SHORT 3   # Dispense 3 short paper sheets
+PAPER LONG 1    # Dispense 1 long paper sheet
+PAPER SHORT 10  # Dispense 10 short paper sheets
+# Response: Silent operation (no response by default)
+# Response on error: "ERR BADARG" for invalid parameters
+
+# ========== STATUS COMMANDS ==========
+
+# Query system status
+STATUS?
+# Response: "C=<total_coins> BUSY=<0|1>"
+# total_coins: current total of inserted coins
+# BUSY: 1 if any hopper/change operation active, 0 if idle
+# Example response: "C=45 BUSY=0"
+
+# ========== AUTOMATIC RESPONSES ==========
+# These are sent automatically by the system during operation:
+
+# Coin insertion detected (from coin acceptor)
+# "IN <denomination>" - sent when coin is inserted
+
+# Coin dispensed (from hoppers)  
+# "OUT <denomination>" - sent when coin is dispensed
+
+# Operation completion
+# "DONE <denomination> <count>" - hopper operation complete
+# "DONE CHANGE <amount>" - change dispensing complete
+
+# Error conditions
+# "ERR BUSY" - operation rejected because system is busy
+# "ERR BADARG" - invalid command or parameters
+# "ERR TIMEOUT <denom> <dispensed>/<target>" - hopper timeout
+
+# ========== COMMAND EXAMPLES ==========
+
+# Typical transaction flow:
+# 1. Insert coins (automatic): "IN 5", "IN 10", "IN 1" 
+# 2. Check balance: "COINS?" → "16"
+# 3. Dispense paper: "PAPER SHORT 1"
+# 4. Give change: "CHANGE 6" → "OUT 5", "OUT 1", "DONE CHANGE 6"
+# 5. Reset for next customer: "COINS=RST"
+
+# Emergency scenarios:
+# Stop everything: "STOP"
+# Check if busy: "STATUS?" → "C=0 BUSY=0"
+
+# Manual coin dispensing:
+# Test 1-peso hopper: "HOPPER 1 3"
+# Test 5-peso hopper: "HOPPER 5 2" 
+# Test 10-peso hopper: "HOPPER 10 1"
+
+# ========== ERROR HANDLING ==========
+
+# If command not recognized: "ERR BADARG"
+# If system busy during new command: "ERR BUSY"
+# If hopper times out: "ERR TIMEOUT <denom> <current>/<target>"
+# If invalid parameters: "ERR BADARG"
+
+# ========== NOTES ==========
+
+# - All commands are processed in main loop (non-blocking)
+# - Multiple coin operations cannot run simultaneously
+# - Paper operations can run concurrently with coin operations
+# - Serial buffer limited to 96 characters per command
+# - Hopper timeout is defined by HOPPER_MAX_GAP_MS in config.h
+# - Coin detection uses debounced buttons with configurable timing
+# - System uses pulsed actuator control for mechanical protection
