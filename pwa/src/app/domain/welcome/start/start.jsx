@@ -62,6 +62,7 @@ export default function Start() {
   // Create refs to store interval ID and mounted status outside of effects
   const intervalIdRef = React.useRef(null);
   const isMountedRef = React.useRef(true);
+  const isProcessingRef = React.useRef(false); // ✅ Prevent duplicate dispense calls
 
   // Function to stop polling
   const stopPolling = () => {
@@ -110,6 +111,7 @@ export default function Start() {
 
     return () => {
       isMountedRef.current = false;
+      isProcessingRef.current = false; // ✅ Reset processing flag on unmount
       stopPolling();
     };
   }, [isPaymentPage]); // Removed handleGetCoinCount from dependencies since it's inside the effect
@@ -147,7 +149,18 @@ export default function Start() {
           <Button
             disabled={buyData?.quantity > amount}
             onClick={async () => {
+              // ✅ Guard against duplicate calls
+              if (isProcessingRef.current) {
+                console.log(
+                  "Already processing purchase, ignoring duplicate click"
+                );
+                return;
+              }
+
               try {
+                // ✅ Set flag immediately to prevent race conditions
+                isProcessingRef.current = true;
+
                 // First, stop the coin polling interval
                 console.log("Buy button clicked. Stopping coin polling...");
                 stopPolling();
@@ -198,6 +211,7 @@ export default function Start() {
 
                   // Show out of paper dialog
                   setDispensing(false);
+                  isProcessingRef.current = false; // ✅ Reset flag on error
                   setShowOutOfPaperDialog(true);
                   return;
                 }
@@ -225,15 +239,19 @@ export default function Start() {
 
                 if (res.status === 200) {
                   console.log("Paper dispensed successfully:", res.data);
+                  // ✅ Keep flag set - don't reset until component unmounts
+                  // This prevents any race condition during navigation
                   navigate(`/system/done`);
                 } else {
                   console.error("Error dispensing paper:", res.data);
                   setDispensing(false);
+                  isProcessingRef.current = false; // ✅ Reset flag on error
                   alert("Error dispensing paper. Please try again.");
                 }
               } catch (err) {
                 console.error("Failed to dispense paper:", err);
                 setDispensing(false);
+                isProcessingRef.current = false; // ✅ Reset flag on error
                 alert("Failed to dispense paper. Please try again.");
               }
             }}
